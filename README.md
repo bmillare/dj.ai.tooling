@@ -2,8 +2,8 @@
 
 Curated tooling patterns for Clojure agent harnesses.
 
-> Status: design-stage. The repository skeleton and research direction are in
-> place; no public runtime API has been selected yet.
+> Status: experimental. The first exact-search editing pattern is available for
+> manual evaluation; its API may change as usage evidence accumulates.
 
 ## Motivation
 
@@ -39,6 +39,30 @@ assumptions embedded in the core library.
 - JDK 21 or newer
 - Clojure 1.12 or newer
 
+## Exact-search editing
+
+`dj.ai.tooling.edit` distills a model-facing editing protocol that uses
+XML-style `<edit>`, `<search>`, and `<replace>` blocks. It supports multiple
+ordered edits, validates the complete plan before writing, rejects missing or
+ambiguous searches, and checks for stale files when applying a plan.
+
+```clojure
+(require '[dj.ai.tooling.edit :as edit])
+
+(def edits (edit/parse-response model-response))
+(def plan (edit/plan "." edits))
+
+;; Inspect :changes or render a diff before choosing to apply.
+(when (= :ready (:status plan))
+  (edit/apply! plan))
+```
+
+File context is intentionally outside this namespace. Any producer can supply
+path-addressed observations to a model; returned edit blocks join those
+observations by repository-relative path. Clipboard workflows, prompt assembly,
+diff rendering, approval UI, and model invocation belong in consumers or a
+future porcelain layer.
+
 ## Development
 
 ```bash
@@ -55,5 +79,5 @@ io.github.bmillare/dj.ai.tooling {:git/sha "<sha>"}
 net.clojars.bmillare/dj.ai.tooling {:mvn/version "0.1.0-alpha1"}
 ```
 
-No production namespace is published yet. The next milestone is an
-evidence-backed design study of editing patterns and a thin experimental slice.
+The next milestone is manual dogfooding of the editing slice and refinement
+from observed model and integration behavior.
