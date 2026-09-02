@@ -4,7 +4,11 @@
  {org.clojure/clojure {:mvn/version "1.12.5"}}
 
  :aliases
- {:nrepl
+ {:dogfood
+  {:extra-paths ["dev"]
+   :main-opts ["-m" "dj.ai.tooling.dogfood"]}
+
+  :nrepl
   {:extra-deps {nrepl/nrepl {:mvn/version "1.5.1"}}
    :extra-paths ["dev" "test"]
    :main-opts ["-m" "nrepl.cmdline"]}

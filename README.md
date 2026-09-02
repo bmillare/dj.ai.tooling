@@ -101,6 +101,22 @@ clojure -X:test
 clojure -T:build jar
 ```
 
+### Manual dogfood workflow
+
+The dev-only terminal app composes the observation and editing primitives with
+Git file discovery, clipboard transport, diff preview, and approval:
+
+```bash
+clojure -M:dogfood
+# or begin with known context
+clojure -M:dogfood src/dj/ai/tooling/edit.clj README.md
+```
+
+Type `help` for commands. A typical loop is `add` -> `select` -> `write`, then
+copy the model response and use `diff` or `edit`. `diff path/to/response.txt`
+and `edit path/to/response.txt` bypass the clipboard for manual testing. The
+app is an evaluation fixture under `dev/`, not public library porcelain.
+
 The prepared coordinates are:
 
 ```clojure
