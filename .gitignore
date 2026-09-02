@@ -1,0 +1,9 @@
+.cpcache/
+.direnv/
+target/
+.nrepl-port
+.calva/
+.clj-kondo/.cache/
+
+# Local deploy credentials. Never commit.
+.secrets.env

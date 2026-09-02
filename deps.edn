@@ -1,0 +1,22 @@
+{:paths ["src"]
+
+ :deps
+ {org.clojure/clojure {:mvn/version "1.12.5"}}
+
+ :aliases
+ {:nrepl
+  {:extra-deps {nrepl/nrepl {:mvn/version "1.5.1"}}
+   :extra-paths ["dev" "test"]
+   :main-opts ["-m" "nrepl.cmdline"]}
+
+  :test
+  {:extra-paths ["dev" "test"]
+   :extra-deps {io.github.cognitect-labs/test-runner
+                {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
+   :main-opts ["-m" "cognitect.test-runner"]
+   :exec-fn cognitect.test-runner.api/test}
+
+  :build
+  {:deps {io.github.clojure/tools.build {:mvn/version "0.10.5"}
+          slipset/deps-deploy             {:mvn/version "0.2.2"}}
+   :ns-default build}}}
