@@ -5,52 +5,67 @@
             [dj.ai.tooling.edit :as edit]
             [dj.ai.tooling.observe :as observe])
   (:gen-class)
-  (:import [java.nio.file Files Path]
+  (:import [java.nio.charset StandardCharsets]
+           [java.nio.file Files Path Paths]
            [java.nio.file.attribute FileAttribute]))
 
 (def default-limits
   {:max-bytes-per-file (* 100 1024)
    :max-total-bytes (* 500 1024)})
 
-(defn initial-state [root paths]
-  {:root root
-   :paths (vec (distinct paths))
-   :matches []
-   :limits default-limits})
+(defn- root-path [root]
+  (-> (if (instance? Path root)
+        root
+        (Paths/get (str root) (make-array String 0)))
+      .toAbsolutePath
+      .normalize))
 
-(defn add-paths [state paths]
-  (update state :paths
-          (fn [current]
-            (reduce (fn [result path]
-                      (if (some #{path} result) result (conj result path)))
-                    current
-                    paths))))
+(defn- remove-outer-quotes [value]
+  (if (and (<= 2 (count value))
+           (= (first value) (last value))
+           (#{\' \"} (first value)))
+    (subs value 1 (dec (count value)))
+    value))
+
+(defn normalize-path
+  "Normalizes an exact relative or absolute input path beneath root."
+  [root input]
+  (let [^Path root (root-path root)
+        input (-> input str/trim remove-outer-quotes)]
+    (when (str/blank? input)
+      (throw (ex-info "Path is empty" {:type :invalid-path :reason :blank})))
+    (let [path (Paths/get input (make-array String 0))
+          target (if (.isAbsolute path)
+                   (.normalize path)
+                   (.normalize (.resolve root path)))]
+      (when-not (.startsWith target root)
+        (throw (ex-info "Path is outside the root"
+                        {:type :invalid-path :reason :outside-root
+                         :root (str root) :path input})))
+      (str (.relativize root target)))))
+
+(defn initial-state [root paths]
+  (let [root (root-path root)]
+    {:root root
+     :paths (vec (distinct (map #(normalize-path root %) paths)))
+     :limits default-limits
+     :pending-plan nil}))
+
+(defn add-path [state path]
+  (let [path (normalize-path (:root state) path)]
+    (cond-> (assoc state :pending-plan nil)
+      (not (some #{path} (:paths state))) (update :paths conj path))))
 
 (defn remove-ids [state ids]
   (let [removed (set ids)]
-    (update state :paths
-            (fn [paths]
-              (into []
-                    (keep-indexed (fn [index path]
-                                    (when-not (removed index) path)))
-                    paths)))))
-
-(defn filter-paths [paths terms]
-  (into []
-        (comp (filter (fn [path]
-                        (every? #(str/includes? path %) terms)))
-              (take 20))
-        paths))
-
-(defn select-ids [state ids]
-  (let [matches (:matches state)]
-    (add-paths state (keep #(get matches %) ids))))
-
-(defn- git-files [{:keys [root]}]
-  (let [{:keys [exit out err]} (shell/sh "git" "ls-files" :dir (str root))]
-    (if (zero? exit)
-      (str/split-lines out)
-      (throw (ex-info "git ls-files failed" {:exit exit :error err})))))
+    (-> state
+        (update :paths
+                (fn [paths]
+                  (into []
+                        (keep-indexed (fn [index path]
+                                        (when-not (removed index) path)))
+                        paths)))
+        (assoc :pending-plan nil))))
 
 (defn- command-available? [command]
   (zero? (:exit (shell/sh "sh" "-c" (str "command -v " command)))))
@@ -59,15 +74,12 @@
   (cond
     (command-available? "pbcopy")
     (case operation :copy ["pbcopy"] :paste ["pbpaste"])
-
     (command-available? "wl-copy")
     (case operation :copy ["wl-copy"] :paste ["wl-paste" "--no-newline"])
-
     (command-available? "xclip")
     (case operation
       :copy ["xclip" "-selection" "clipboard"]
       :paste ["xclip" "-selection" "clipboard" "-o"])
-
     :else
     (throw (ex-info "No supported clipboard command found"
                     {:tried ["pbcopy/pbpaste" "wl-copy/wl-paste" "xclip"]}))))
@@ -85,20 +97,26 @@
       out
       (throw (ex-info "Clipboard paste failed" {:exit exit :error err})))))
 
-(defn- observation-result [{:keys [root paths limits]}]
-  (observe/load (observe/plan root (mapv #(hash-map :path %) paths) limits)))
+(defn observation-result [{:keys [root paths limits]}]
+  (let [plan (observe/plan root (mapv #(hash-map :path %) paths) limits)]
+    (if (= :ready (:status plan))
+      (observe/load plan)
+      plan)))
 
-(defn- prompt-result [state]
+(defn prompt-result [state]
   (let [result (observation-result state)]
     (if (= :observed (:status result))
-      {:status :ready
-       :prompt (str edit/instructions
-                    (observe/present (:observations result))
-                    "```")}
+      (let [presented (observe/present (:observations result))]
+        {:status :ready
+         :file-count (count (:observations result))
+         :content-bytes (reduce + (map #(alength (.getBytes ^String (:content %)
+                                                            StandardCharsets/UTF_8))
+                                       (:observations result)))
+         :prompt (str edit/instructions presented "```")})
       result)))
 
 (defn- response-text [argument]
-  (if argument (slurp argument) (clipboard-paste)))
+  (if (str/blank? argument) (clipboard-paste) (slurp argument)))
 
 (defn- edit-plan [state argument]
   (edit/plan (:root state)
@@ -128,99 +146,121 @@
     (doseq [change (:changes plan)] (print-diff! change))
     (println "Rejected:" (pr-str (:errors plan)))))
 
-(defn- parse-ids [arguments]
-  (mapv parse-long arguments))
+(defn- parse-ids [argument]
+  (let [tokens (remove str/blank? (str/split (or argument "") #"\s+"))
+        ids (mapv parse-long tokens)]
+    (when (or (empty? ids) (some nil? ids))
+      (throw (ex-info "Expected one or more numeric file IDs"
+                      {:type :invalid-command-arguments :argument argument})))
+    ids))
 
-(defn- print-indexed! [paths]
-  (doseq [[index path] (map-indexed vector paths)]
-    (println index path)))
+(defn- print-files! [paths]
+  (if (seq paths)
+    (doseq [[index path] (map-indexed vector paths)] (println index path))
+    (println "No context files.")))
+
+(defn- print-status! [{:keys [root paths limits pending-plan]}]
+  (println "Root:" (str root))
+  (println "Context:" (count paths) (if (= 1 (count paths)) "file" "files"))
+  (println "Limits:" (pr-str limits))
+  (println "Pending:"
+           (if (= :ready (:status pending-plan))
+             (str (count (:changes pending-plan)) " file change(s)")
+             "none")))
 
 (defn- print-help! []
   (println
    (str "Commands:\n"
-        "  add TERM...       filter git files (all terms must match)\n"
-        "  select ID...      add numbered matches to context\n"
-        "  add-path PATH...  add exact paths to context\n"
-        "  list              list context paths\n"
-        "  remove ID...      remove numbered context paths\n"
-        "  clear             clear context paths\n"
-        "  write             copy model prompt to clipboard\n"
-        "  diff [FILE]       preview edits from clipboard or response file\n"
-        "  edit [FILE]       preview and optionally apply edits\n"
+        "  add PATH          add one exact path (relative or inside root)\n"
+        "  files             list context files\n"
+        "  remove ID...      remove context files by displayed ID\n"
+        "  clear             clear context files\n"
+        "  prompt            copy the model prompt to clipboard\n"
+        "  preview [FILE]    preview response from clipboard or file\n"
+        "  apply             apply the previously previewed plan\n"
+        "  status            show root, limits, and pending work\n"
         "  help              show commands\n"
         "  quit              exit")))
+
+(defn- command-parts [line]
+  (let [line (str/trim line)]
+    (if (empty? line)
+      ["" ""]
+      (let [[_ command argument] (re-matches #"(?s)(\S+)(?:\s+(.*))?" line)]
+        [command (or argument "")]))))
 
 (defn execute-command
   "Executes one command and returns the next explicit application state."
   [state line]
-  (let [[command & arguments] (str/split (str/trim line) #"\s+")]
+  (let [[command argument] (command-parts line)]
     (case command
       "add"
-      (let [matches (filter-paths (git-files state) arguments)]
-        (print-indexed! matches)
-        (assoc state :matches matches))
-
-      "select"
-      (select-ids state (parse-ids arguments))
-
-      "add-path"
-      (add-paths state arguments)
-
-      "list"
-      (do (print-indexed! (:paths state)) state)
-
+      (let [next-state (add-path state argument)]
+        (println "Added:" (normalize-path (:root state) argument))
+        next-state)
+      "files"
+      (do (print-files! (:paths state)) state)
       "remove"
-      (remove-ids state (parse-ids arguments))
-
+      (remove-ids state (parse-ids argument))
       "clear"
-      (assoc state :paths [])
-
-      "write"
+      (assoc state :paths [] :pending-plan nil)
+      "prompt"
       (let [result (prompt-result state)]
         (if (= :ready (:status result))
-          (do (clipboard-copy! (:prompt result))
-              (println "Prompt copied to clipboard."))
+          (do
+            (clipboard-copy! (:prompt result))
+            (println "Prompt copied:" (:file-count result) "file(s),"
+                     (:content-bytes result) "content bytes."))
           (println "Rejected:" (pr-str (:errors result))))
         state)
-
-      "diff"
-      (do (show-plan! (edit-plan state (first arguments))) state)
-
-      "edit"
-      (let [plan (edit-plan state (first arguments))]
+      "preview"
+      (let [plan (edit-plan state argument)]
         (show-plan! plan)
-        (when (= :ready (:status plan))
-          (print "Apply edits? y/[n] ")
-          (flush)
-          (if (= "y" (read-line))
-            (println (pr-str (edit/apply! plan)))
-            (println "Ignoring edits.")))
-        state)
-
+        (if (= :ready (:status plan))
+          (do
+            (println "Pending:" (count (:changes plan)) "file change(s).")
+            (assoc state :pending-plan plan))
+          (assoc state :pending-plan nil)))
+      "apply"
+      (if (= :ready (-> state :pending-plan :status))
+        (let [result (edit/apply! (:pending-plan state))]
+          (println (if (= :applied (:status result)) "Applied:" "Rejected:")
+                   (pr-str (if (= :applied (:status result))
+                             {:files (mapv :file (:changes result))}
+                             (:errors result))))
+          (cond-> state
+            (= :applied (:status result)) (assoc :pending-plan nil)))
+        (do (println "Nothing pending; run preview first.") state))
+      "status"
+      (do (print-status! state) state)
       "help"
       (do (print-help!) state)
-
       ""
       state
-
       (do (println "Unknown command; type help.") state))))
 
 (defn -main [& paths]
-  (println "dj.ai.tooling dogfood")
-  (print-help!)
-  (loop [state (initial-state (.toAbsolutePath (Path/of "." (make-array String 0)))
-                             paths)]
-    (println)
-    (println "Context:" (count (:paths state)) "files")
-    (print "> ")
-    (flush)
-    (if-let [line (read-line)]
-      (if (= "quit" (str/trim line))
-        nil
-        (let [next-state (try
-                           (execute-command state line)
-                           (catch Exception error
-                             (println "Error:" (ex-message error))
-                             state))]
-          (recur next-state)))
-      nil)))
+  (let [root (root-path (Path/of "." (make-array String 0)))]
+    (println "dj.ai.tooling dogfood")
+    (println "Root:" (str root))
+    (println "Type `add PATH`, `files`, or `help`.")
+    (loop [state (initial-state root paths)]
+      (println)
+      (println (str "Context: " (count (:paths state)) " "
+                    (if (= 1 (count (:paths state))) "file" "files")
+                    (when (= :ready (-> state :pending-plan :status))
+                      " — edits pending")))
+      (print "> ")
+      (flush)
+      (if-let [line (read-line)]
+        (if (= "quit" (str/trim line))
+          nil
+          (let [next-state (try
+                             (execute-command state line)
+                             (catch Exception error
+                               (println "Error:" (ex-message error))
+                               (when-let [data (ex-data error)]
+                                 (println (pr-str data)))
+                               state))]
+            (recur next-state)))
+        nil))))

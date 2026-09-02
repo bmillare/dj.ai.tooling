@@ -112,10 +112,16 @@ clojure -M:dogfood
 clojure -M:dogfood src/dj/ai/tooling/edit.clj README.md
 ```
 
-Type `help` for commands. A typical loop is `add` -> `select` -> `write`, then
-copy the model response and use `diff` or `edit`. `diff path/to/response.txt`
-and `edit path/to/response.txt` bypass the clipboard for manual testing. The
-app is an evaluation fixture under `dev/`, not public library porcelain.
+The app always treats its process working directory as the target root. When
+the tooling clone lives elsewhere, invoke it through an external launcher that
+puts its absolute `src` and `dev` directories on the classpath while preserving
+the current directory, as in `nix develop /path/to/dj.ai.tooling --command ...`.
+
+Type `help` for commands. A typical loop is `add PATH` -> `prompt`, then copy
+the model response and use `preview` -> `apply`. `preview RESPONSE_FILE`
+bypasses the clipboard for deterministic testing. Absolute paths inside the
+root are normalized; paths outside it are rejected. The app is an evaluation
+fixture under `dev/`, not public library porcelain.
 
 The prepared coordinates are:
 
