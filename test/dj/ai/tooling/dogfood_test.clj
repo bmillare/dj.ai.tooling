@@ -106,3 +106,16 @@
       (is (= ["dan_course.org" "notes/dan_creativity.org"] (:paths result)))
       (is (= ["notes/dan_creativity.org" "dan_course.org"]
              (:paths selected))))))
+
+(deftest empty-find-matches-all-files
+  (let [root (temp-dir)]
+    (Files/createDirectory (.resolve root ".cpcache")
+                           (make-array FileAttribute 0))
+    (Files/writeString (.resolve root "b.txt") "b"
+                       (make-array java.nio.file.OpenOption 0))
+    (Files/writeString (.resolve root "a.txt") "a"
+                       (make-array java.nio.file.OpenOption 0))
+    (Files/writeString (.resolve root ".cpcache/ignored") "cache"
+                       (make-array java.nio.file.OpenOption 0))
+    (is (= ["a.txt" "b.txt"]
+           (:paths (dogfood/find-paths root []))))))

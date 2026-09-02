@@ -16,7 +16,7 @@
 (def ^:private max-scanned-files 10000)
 (def ^:private max-candidates 20)
 (def ^:private skipped-directory-names
-  #{".git" ".hg" ".svn" ".direnv" "node_modules" "target"})
+  #{".git" ".hg" ".svn" ".cpcache" ".direnv" "node_modules" "target"})
 
 (defn- root-path [root]
   (-> (if (instance? Path root)
@@ -237,7 +237,7 @@
 (defn- print-help! []
   (println
    (str "Commands:\n"
-        "  find TERM...      find files below root (all terms must match)\n"
+        "  find [TERM...]    find files below root; empty matches all\n"
         "  take cID...       add candidate files found by `find`\n"
         "  add PATH          add one exact path (relative or inside root)\n"
         "  list              list context files\n"
@@ -269,9 +269,6 @@
     (case command
       "find"
       (let [terms (remove str/blank? (str/split argument #"\s+"))]
-        (when (empty? terms)
-          (throw (ex-info "Expected one or more search terms"
-                          {:type :invalid-command-arguments})))
         (let [result (find-paths (:root state) terms)]
           (print-candidates! result)
           (assoc state :candidates (:paths result))))
@@ -326,27 +323,30 @@
       (do (println "Unknown command; type help.") state))))
 
 (defn -main [& paths]
-  (let [root (root-path (Path/of "." (make-array String 0)))]
-    (println "dj.ai.tooling dogfood")
-    (println "Root:" (str root))
-    (println "Type `find TERM`, `add PATH`, or `help`.")
-    (loop [state (initial-state root paths)]
-      (println)
-      (println (str "Context: " (count (:paths state)) " "
-                    (if (= 1 (count (:paths state))) "file" "files")
-                    (when (= :ready (-> state :pending-plan :status))
-                      " — edits pending")))
-      (print "> ")
-      (flush)
-      (if-let [line (read-line)]
-        (if (= "quit" (str/trim line))
-          nil
-          (let [next-state (try
-                             (execute-command state line)
-                             (catch Exception error
-                               (println "Error:" (ex-message error))
-                               (when-let [data (ex-data error)]
-                                 (println (pr-str data)))
-                               state))]
-            (recur next-state)))
-        nil))))
+  (try
+    (let [root (root-path (Path/of "." (make-array String 0)))]
+      (println "dj.ai.tooling dogfood")
+      (println "Root:" (str root))
+      (println "Type `find`, `find TERM`, `add PATH`, or `help`.")
+      (loop [state (initial-state root paths)]
+        (println)
+        (println (str "Context: " (count (:paths state)) " "
+                      (if (= 1 (count (:paths state))) "file" "files")
+                      (when (= :ready (-> state :pending-plan :status))
+                        " — edits pending")))
+        (print "> ")
+        (flush)
+        (if-let [line (read-line)]
+          (if (= "quit" (str/trim line))
+            nil
+            (let [next-state (try
+                               (execute-command state line)
+                               (catch Exception error
+                                 (println "Error:" (ex-message error))
+                                 (when-let [data (ex-data error)]
+                                   (println (pr-str data)))
+                                 state))]
+              (recur next-state)))
+          nil)))
+    (finally
+      (shutdown-agents))))
