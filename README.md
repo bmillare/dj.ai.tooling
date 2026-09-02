@@ -2,8 +2,9 @@
 
 Curated tooling patterns for Clojure agent harnesses.
 
-> Status: experimental. The first exact-search editing pattern is available for
-> manual evaluation; its API may change as usage evidence accumulates.
+> Status: experimental. Exact-search editing and whole-file observation
+> primitives are available for manual evaluation; their APIs may change as
+> usage evidence accumulates.
 
 ## Motivation
 
@@ -63,6 +64,35 @@ observations by repository-relative path. Clipboard workflows, prompt assembly,
 diff rendering, approval UI, and model invocation belong in consumers or a
 future porcelain layer.
 
+## Whole-file observation
+
+`dj.ai.tooling.observe` separates filesystem requests, loading, and
+model-facing presentation. Loaded observations are ordinary `{:path :content}`
+maps, so callers that already possess content can use the same presentation
+seam without invoking the filesystem loader.
+
+```clojure
+(require '[dj.ai.tooling.observe :as observe])
+
+(def plan
+  (observe/plan "."
+                [{:path "src/example/core.clj"}
+                 {:path "README.md"}]
+                {:max-bytes-per-file 50000
+                 :max-total-bytes 100000}))
+
+(def result (observe/load plan))
+
+(when (= :observed (:status result))
+  (observe/present (:observations result)))
+```
+
+Whole-file loading is the only supported request form. Limits are optional and
+reject the entire load before content is returned; there is intentionally no
+implicit truncation or windowing. Loading also rejects missing files,
+non-regular files, lexical path traversal, and symlinks resolving outside the
+configured root.
+
 ## Development
 
 ```bash
@@ -79,5 +109,5 @@ io.github.bmillare/dj.ai.tooling {:git/sha "<sha>"}
 net.clojars.bmillare/dj.ai.tooling {:mvn/version "0.1.0-alpha1"}
 ```
 
-The next milestone is manual dogfooding of the editing slice and refinement
-from observed model and integration behavior.
+The next milestone is a minimal manual dogfood workflow around observation and
+editing, followed by refinement from observed model and integration behavior.
