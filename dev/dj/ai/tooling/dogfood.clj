@@ -6,12 +6,17 @@
             [dj.ai.tooling.observe :as observe])
   (:gen-class)
   (:import [java.nio.charset StandardCharsets]
-           [java.nio.file Files Path Paths]
-           [java.nio.file.attribute FileAttribute]))
+           [java.nio.file FileVisitResult Files Path Paths SimpleFileVisitor]
+           [java.nio.file.attribute BasicFileAttributes FileAttribute]))
 
 (def default-limits
   {:max-bytes-per-file (* 100 1024)
    :max-total-bytes (* 500 1024)})
+
+(def ^:private max-scanned-files 10000)
+(def ^:private max-candidates 20)
+(def ^:private skipped-directory-names
+  #{".git" ".hg" ".svn" ".direnv" "node_modules" "target"})
 
 (defn- root-path [root]
   (-> (if (instance? Path root)
@@ -48,6 +53,7 @@
   (let [root (root-path root)]
     {:root root
      :paths (vec (distinct (map #(normalize-path root %) paths)))
+     :candidates []
      :limits default-limits
      :pending-plan nil}))
 
@@ -66,6 +72,52 @@
                                         (when-not (removed index) path)))
                         paths)))
         (assoc :pending-plan nil))))
+
+(defn find-paths
+  "Finds cwd-relative regular files containing every case-insensitive term.
+  Traversal and returned candidates are bounded for interactive use."
+  [root terms]
+  (let [^Path root (root-path root)
+        terms (mapv str/lower-case terms)
+        scanned (atom 0)
+        matches (atom [])
+        scan-limited? (atom false)]
+    (Files/walkFileTree
+     root
+     (proxy [SimpleFileVisitor] []
+       (preVisitDirectory [^Path directory ^BasicFileAttributes _]
+         (if (and (not= root directory)
+                  (skipped-directory-names (str (.getFileName directory))))
+           FileVisitResult/SKIP_SUBTREE
+           FileVisitResult/CONTINUE))
+       (visitFile [^Path file ^BasicFileAttributes attributes]
+         (if (>= @scanned max-scanned-files)
+           (do (reset! scan-limited? true) FileVisitResult/TERMINATE)
+           (do
+             (swap! scanned inc)
+             (let [relative (str (.relativize root file))
+                   candidate (str/lower-case relative)]
+               (when (and (.isRegularFile attributes)
+                          (every? #(str/includes? candidate %) terms))
+                 (swap! matches conj relative)))
+             FileVisitResult/CONTINUE)))
+       (visitFileFailed [_ _]
+         FileVisitResult/CONTINUE)))
+    (let [matches (vec (sort @matches))]
+      {:paths (subvec matches 0 (min max-candidates (count matches)))
+       :scanned @scanned
+       :scan-limited? @scan-limited?
+       :matches-limited? (> (count matches) max-candidates)})))
+
+(defn take-candidates [state ids]
+  (let [candidates (:candidates state)
+        selected (mapv (fn [id]
+                         (or (get candidates id)
+                             (throw (ex-info "Candidate ID does not exist"
+                                             {:type :invalid-candidate-id
+                                              :id id}))))
+                       ids)]
+    (reduce add-path state selected)))
 
 (defn- command-available? [command]
   (zero? (:exit (shell/sh "sh" "-c" (str "command -v " command)))))
@@ -146,18 +198,32 @@
     (doseq [change (:changes plan)] (print-diff! change))
     (println "Rejected:" (pr-str (:errors plan)))))
 
-(defn- parse-ids [argument]
+(defn- parse-ids [prefix argument]
   (let [tokens (remove str/blank? (str/split (or argument "") #"\s+"))
-        ids (mapv parse-long tokens)]
+        pattern (re-pattern (str prefix "(\\d+)"))
+        ids (mapv (fn [token]
+                    (some-> (re-matches pattern token) second parse-long))
+                  tokens)]
     (when (or (empty? ids) (some nil? ids))
-      (throw (ex-info "Expected one or more numeric file IDs"
-                      {:type :invalid-command-arguments :argument argument})))
+      (throw (ex-info (str "Expected one or more " prefix "-prefixed IDs")
+                      {:type :invalid-command-arguments
+                       :expected (str prefix "0 " prefix "1 ...")
+                       :argument argument})))
     ids))
 
 (defn- print-files! [paths]
   (if (seq paths)
-    (doseq [[index path] (map-indexed vector paths)] (println index path))
+    (doseq [[index path] (map-indexed vector paths)] (println (str "f" index) path))
     (println "No context files.")))
+
+(defn- print-candidates! [{:keys [paths scanned scan-limited? matches-limited?]}]
+  (if (seq paths)
+    (doseq [[index path] (map-indexed vector paths)] (println (str "c" index) path))
+    (println "No matching files."))
+  (when (or scan-limited? matches-limited?)
+    (println "Results bounded:"
+             (str scanned " files scanned,")
+             (str (count paths) " candidates shown."))))
 
 (defn- print-status! [{:keys [root paths limits pending-plan]}]
   (println "Root:" (str root))
@@ -171,16 +237,23 @@
 (defn- print-help! []
   (println
    (str "Commands:\n"
+        "  find TERM...      find files below root (all terms must match)\n"
+        "  take cID...       add candidate files found by `find`\n"
         "  add PATH          add one exact path (relative or inside root)\n"
-        "  files             list context files\n"
-        "  remove ID...      remove context files by displayed ID\n"
+        "  list              list context files\n"
+        "  remove fID...     remove context files by displayed ID\n"
         "  clear             clear context files\n"
         "  prompt            copy the model prompt to clipboard\n"
-        "  preview [FILE]    preview response from clipboard or file\n"
-        "  apply             apply the previously previewed plan\n"
+        "  response [FILE]   consume response from clipboard or file; plan it\n"
+        "  apply             write the pending, previously reviewed plan\n"
         "  status            show root, limits, and pending work\n"
         "  help              show commands\n"
-        "  quit              exit")))
+        "  quit              exit\n"
+        "\nGlossary:\n"
+        "  context   selected files whose contents go into the model prompt\n"
+        "  response  model output containing XML-style requested edits\n"
+        "  plan      validated proposed file contents, computed without writing\n"
+        "  pending   the exact reviewed plan that `apply` will attempt to write")))
 
 (defn- command-parts [line]
   (let [line (str/trim line)]
@@ -194,14 +267,27 @@
   [state line]
   (let [[command argument] (command-parts line)]
     (case command
+      "find"
+      (let [terms (remove str/blank? (str/split argument #"\s+"))]
+        (when (empty? terms)
+          (throw (ex-info "Expected one or more search terms"
+                          {:type :invalid-command-arguments})))
+        (let [result (find-paths (:root state) terms)]
+          (print-candidates! result)
+          (assoc state :candidates (:paths result))))
+      "take"
+      (let [next-state (take-candidates state (parse-ids "c" argument))
+            added (remove (set (:paths state)) (:paths next-state))]
+        (doseq [path added] (println "Added:" path))
+        next-state)
       "add"
       (let [next-state (add-path state argument)]
         (println "Added:" (normalize-path (:root state) argument))
         next-state)
-      "files"
+      "list"
       (do (print-files! (:paths state)) state)
       "remove"
-      (remove-ids state (parse-ids argument))
+      (remove-ids state (parse-ids "f" argument))
       "clear"
       (assoc state :paths [] :pending-plan nil)
       "prompt"
@@ -213,7 +299,7 @@
                      (:content-bytes result) "content bytes."))
           (println "Rejected:" (pr-str (:errors result))))
         state)
-      "preview"
+      "response"
       (let [plan (edit-plan state argument)]
         (show-plan! plan)
         (if (= :ready (:status plan))
@@ -230,7 +316,7 @@
                              (:errors result))))
           (cond-> state
             (= :applied (:status result)) (assoc :pending-plan nil)))
-        (do (println "Nothing pending; run preview first.") state))
+        (do (println "Nothing pending; run response first.") state))
       "status"
       (do (print-status! state) state)
       "help"
@@ -243,7 +329,7 @@
   (let [root (root-path (Path/of "." (make-array String 0)))]
     (println "dj.ai.tooling dogfood")
     (println "Root:" (str root))
-    (println "Type `add PATH`, `files`, or `help`.")
+    (println "Type `find TERM`, `add PATH`, or `help`.")
     (loop [state (initial-state root paths)]
       (println)
       (println (str "Context: " (count (:paths state)) " "

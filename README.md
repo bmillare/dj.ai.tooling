@@ -104,7 +104,7 @@ clojure -T:build jar
 ### Manual dogfood workflow
 
 The dev-only terminal app composes the observation and editing primitives with
-Git file discovery, clipboard transport, diff preview, and approval:
+bounded filesystem selection, clipboard transport, diff review, and application:
 
 ```bash
 clojure -M:dogfood
@@ -117,10 +117,13 @@ the tooling clone lives elsewhere, invoke it through an external launcher that
 puts its absolute `src` and `dev` directories on the classpath while preserving
 the current directory, as in `nix develop /path/to/dj.ai.tooling --command ...`.
 
-Type `help` for commands. A typical loop is `add PATH` -> `prompt`, then copy
-the model response and use `preview` -> `apply`. `preview RESPONSE_FILE`
-bypasses the clipboard for deterministic testing. Absolute paths inside the
-root are normalized; paths outside it are rejected. The app is an evaluation
+Type `help` for commands and a glossary. Add an exact path directly, or use
+`find TERM...` and `take cID...` for Git-independent partial matching. A typical
+loop is selection -> `prompt`, then copy the model response and use `response`
+-> `apply`. `response RESPONSE_FILE` bypasses the clipboard for deterministic
+testing. `response` computes and displays a validated, non-writing edit plan;
+`apply` writes that exact pending plan. Absolute paths inside the root are
+normalized, while paths outside it are rejected. The app is an evaluation
 fixture under `dev/`, not public library porcelain.
 
 The prepared coordinates are:

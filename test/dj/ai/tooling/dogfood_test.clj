@@ -1,5 +1,5 @@
 (ns dj.ai.tooling.dogfood-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [clojure.test :refer [deftest is]]
             [dj.ai.tooling.dogfood :as dogfood])
   (:import [java.nio.file Files]
            [java.nio.file.attribute FileAttribute]))
@@ -62,16 +62,14 @@
       (is (.contains ^String (:prompt result)
                      "<file path=\"example.txt\">\nhello\n</file>")))))
 
-(deftest explicit-state-commands-use-files-not-candidates
+(deftest explicit-state-commands-use-prefixed-context-ids
   (let [state (dogfood/initial-state "." [])
         added (dogfood/execute-command state "add path with spaces.txt")
-        removed (dogfood/execute-command added "remove 0")]
+        removed (dogfood/execute-command added "remove f0")]
     (is (= ["path with spaces.txt"] (:paths added)))
-    (is (= [] (:paths removed)))
-    (testing "removed discovery commands are not silently retained"
-      (is (= state (dogfood/execute-command state "select 0"))))))
+    (is (= [] (:paths removed)))))
 
-(deftest preview-stores-the-exact-plan-that-apply-consumes
+(deftest response-stores-the-exact-plan-that-apply-consumes
   (let [root (temp-dir)
         target (.resolve root "target.txt")
         response (.resolve root "response.txt")]
@@ -84,9 +82,27 @@
           "</edit>\n")
      (make-array java.nio.file.OpenOption 0))
     (let [state (dogfood/initial-state root ["target.txt"])
-          previewed (dogfood/execute-command state (str "preview " response))]
-      (is (= :ready (-> previewed :pending-plan :status)))
+          planned (dogfood/execute-command state (str "response " response))]
+      (is (= :ready (-> planned :pending-plan :status)))
       (is (= "before\n" (Files/readString target)))
-      (let [applied (dogfood/execute-command previewed "apply")]
+      (let [applied (dogfood/execute-command planned "apply")]
         (is (nil? (:pending-plan applied)))
         (is (= "after\n" (Files/readString target)))))))
+
+(deftest filesystem-find-and-take-are-git-independent
+  (let [root (temp-dir)]
+    (Files/createDirectories (.resolve root "notes")
+                             (make-array FileAttribute 0))
+    (Files/writeString (.resolve root "dan_course.org") "x"
+                       (make-array java.nio.file.OpenOption 0))
+    (Files/writeString (.resolve root "notes/dan_creativity.org") "x"
+                       (make-array java.nio.file.OpenOption 0))
+    (Files/writeString (.resolve root "notes/other.org") "x"
+                       (make-array java.nio.file.OpenOption 0))
+    (let [result (dogfood/find-paths root ["DAN" "org"])
+          state (assoc (dogfood/initial-state root [])
+                       :candidates (:paths result))
+          selected (dogfood/take-candidates state [1 0])]
+      (is (= ["dan_course.org" "notes/dan_creativity.org"] (:paths result)))
+      (is (= ["notes/dan_creativity.org" "dan_course.org"]
+             (:paths selected))))))
