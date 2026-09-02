@@ -34,23 +34,23 @@
         state (dogfood/add-path state "b")
         state (dogfood/add-path state "a")]
     (is (= ["a" "b"] (:paths state)))
-    (is (nil? (:pending-plan state)))))
+    (is (nil? (:changeset state)))))
 
-(deftest removing-context-invalidates-the-pending-plan
+(deftest removing-context-invalidates-the-staged-changeset
   (let [state (assoc (dogfood/initial-state "." ["a" "b" "c"])
-                     :pending-plan {:status :ready})
+                     :changeset {:status :ready})
         removed (dogfood/remove-ids state [1])]
     (is (= ["a" "c"] (:paths removed)))
-    (is (nil? (:pending-plan removed)))))
+    (is (nil? (:changeset removed)))))
 
-(deftest observation-errors-are-not-replaced-by-invalid-plan-errors
+(deftest snapshot-errors-are-preserved
   (let [root (temp-dir)
-        result (dogfood/observation-result
+        result (dogfood/snapshot-result
                 (dogfood/initial-state root ["missing.txt"]))]
     (is (= :rejected (:status result)))
     (is (= :file-not-found (-> result :errors first :type)))))
 
-(deftest prompt-result-contains-plain-file-observations
+(deftest prompt-result-renders-file-snapshots
   (let [root (temp-dir)
         file (.resolve root "example.txt")]
     (Files/writeString file "hello" (make-array java.nio.file.OpenOption 0))
@@ -69,7 +69,7 @@
     (is (= ["path with spaces.txt"] (:paths added)))
     (is (= [] (:paths removed)))))
 
-(deftest response-stores-the-exact-plan-that-apply-consumes
+(deftest stage-stores-the-exact-changeset-that-commit-consumes
   (let [root (temp-dir)
         target (.resolve root "target.txt")
         response (.resolve root "response.txt")]
@@ -82,11 +82,11 @@
           "</edit>\n")
      (make-array java.nio.file.OpenOption 0))
     (let [state (dogfood/initial-state root ["target.txt"])
-          planned (dogfood/execute-command state (str "response " response))]
-      (is (= :ready (-> planned :pending-plan :status)))
+          staged (dogfood/execute-command state (str "stage " response))]
+      (is (= :ready (-> staged :changeset :status)))
       (is (= "before\n" (Files/readString target)))
-      (let [applied (dogfood/execute-command planned "apply")]
-        (is (nil? (:pending-plan applied)))
+      (let [committed (dogfood/execute-command staged "commit")]
+        (is (nil? (:changeset committed)))
         (is (= "after\n" (Files/readString target)))))))
 
 (deftest filesystem-find-and-take-are-git-independent

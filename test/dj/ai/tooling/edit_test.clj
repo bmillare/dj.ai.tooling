@@ -23,7 +23,7 @@
           {:file "test/app_test.clj"
            :search ""
            :replace "(ns app-test)\n"}]
-         (edit/parse-response
+         (edit/parse
           (str "Here are the edits:\n"
                "<edit file=\"src/app.clj\">\n"
                "<search>\n(def old 1)\n</search>\n"
@@ -32,10 +32,10 @@
                "<search></search>\n"
                "<replace>\n(ns app-test)\n\n</replace>\n</edit>")))))
 
-(deftest plans-and-applies-ordered-edits
+(deftest stages-and-commits-ordered-patches
   (let [root (temp-dir)]
     (write! root "src/app.clj" "(def old 1)\n(old)\n")
-    (let [plan (edit/plan root
+    (let [changeset (edit/stage root
                           [{:file "src/app.clj"
                             :search "(def old 1)"
                             :replace "(def new 1)"}
@@ -45,12 +45,16 @@
                            {:file "test/app_test.clj"
                             :search ""
                             :replace "(ns app-test)\n"}])]
-      (is (= :ready (:status plan)))
+      (is (= :ready (:status changeset)))
+      (is (= [{:file "src/app.clj" :existed? true
+               :before "(def old 1)\n(old)\n"}
+              {:file "test/app_test.clj" :existed? false :before nil}]
+             (:basis changeset)))
       (is (= ["src/app.clj" "test/app_test.clj"]
-             (mapv :file (:changes plan))))
+             (mapv :file (:changes changeset))))
       (is (= "(def new 1)\n(uses new)\n"
-             (:after (first (:changes plan)))))
-      (is (= :applied (:status (edit/apply! plan))))
+             (:after (first (:changes changeset)))))
+      (is (= :committed (:status (edit/commit! changeset))))
       (is (= "(def new 1)\n(uses new)\n" (read! root "src/app.clj")))
       (is (= "(ns app-test)\n" (read! root "test/app_test.clj"))))))
 
@@ -58,36 +62,36 @@
   (let [root (temp-dir)
         original "same\nother\nsame\n"]
     (write! root "a.txt" original)
-    (let [plan (edit/plan root [{:file "a.txt"
+    (let [changeset (edit/stage root [{:file "a.txt"
                                  :search "same"
                                  :replace "changed"}])]
-      (is (= :rejected (:status plan)))
-      (is (= :search-not-unique (-> plan :errors first :type)))
-      (is (= 2 (-> plan :errors first :match-count)))
+      (is (= :rejected (:status changeset)))
+      (is (= :search-not-unique (-> changeset :errors first :type)))
+      (is (= 2 (-> changeset :errors first :match-count)))
       (is (= original (read! root "a.txt"))))))
 
 (deftest rejects-invalid-sequence-without-writing
   (let [root (temp-dir)
         original "first\n"]
     (write! root "a.txt" original)
-    (let [plan (edit/plan root [{:file "a.txt"
+    (let [changeset (edit/stage root [{:file "a.txt"
                                  :search "first"
                                  :replace "changed"}
                                 {:file "missing.txt"
                                  :search "not present"
                                  :replace "replacement"}])]
-      (is (= :rejected (:status plan)))
-      (is (= :file-not-found (-> plan :errors first :type)))
+      (is (= :rejected (:status changeset)))
+      (is (= :file-not-found (-> changeset :errors first :type)))
       (is (= original (read! root "a.txt"))))))
 
-(deftest apply-rejects-stale-files-before-writing
+(deftest commit-rejects-stale-files-before-writing
   (let [root (temp-dir)]
     (write! root "a.txt" "old-a")
     (write! root "b.txt" "old-b")
-    (let [plan (edit/plan root [{:file "a.txt" :search "old-a" :replace "new-a"}
+    (let [changeset (edit/stage root [{:file "a.txt" :search "old-a" :replace "new-a"}
                                 {:file "b.txt" :search "old-b" :replace "new-b"}])]
       (write! root "b.txt" "someone else changed it")
-      (let [result (edit/apply! plan)]
+      (let [result (edit/commit! changeset)]
         (is (= :rejected (:status result)))
         (is (= :file-changed (-> result :errors first :type)))
         (is (= "old-a" (read! root "a.txt")))
@@ -96,12 +100,12 @@
 (deftest rejects-file-creation-over-existing-file
   (let [root (temp-dir)]
     (write! root "a.txt" "keep")
-    (let [result (edit/plan root [{:file "a.txt" :search "" :replace "replace"}])]
+    (let [result (edit/stage root [{:file "a.txt" :search "" :replace "replace"}])]
       (is (= :file-already-exists (-> result :errors first :type)))
       (is (= "keep" (read! root "a.txt"))))))
 
 (deftest rejects-paths-outside-root
-  (let [result (edit/plan (temp-dir)
+  (let [result (edit/stage (temp-dir)
                           [{:file "../outside.txt"
                             :search ""
                             :replace "no"}])]
@@ -109,6 +113,6 @@
     (is (= :invalid-path (-> result :errors first :type)))))
 
 (deftest rejects-an-empty-edit-list
-  (let [result (edit/plan (temp-dir) [])]
+  (let [result (edit/stage (temp-dir) [])]
     (is (= :rejected (:status result)))
-    (is (= :no-edits (-> result :errors first :type)))))
+    (is (= :no-patches (-> result :errors first :type)))))

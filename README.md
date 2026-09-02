@@ -2,7 +2,7 @@
 
 Curated tooling patterns for Clojure agent harnesses.
 
-> Status: experimental. Exact-search editing and whole-file observation
+> Status: experimental. Exact-search patching and whole-file snapshots
 > primitives are available for manual evaluation; their APIs may change as
 > usage evidence accumulates.
 
@@ -11,7 +11,7 @@ Curated tooling patterns for Clojure agent harnesses.
 A conventional tool call is only one way for a language model to interact with
 the world. The larger design unit is a **tooling pattern**: the model-facing
 representation, constraints and continuation rules, runtime contract, and the
-observation returned after the world is inspected or changed.
+Snapshot or result returned after the world is inspected or changed.
 
 Good patterns reduce incidental work for the model—shell escaping, fragile
 syntax, unbounded output, and whole-file rewriting—while making effects precise,
@@ -19,8 +19,8 @@ reviewable, testable, and safe to compose.
 
 ## Initial areas
 
-- **Editing:** precise and recoverable changes with low syntax burden.
-- **Guarded/windowed observation:** bounded, attributable views with explicit
+- **Patching:** precise and recoverable changes with low syntax burden.
+- **Guarded/windowed snapshots:** bounded, attributable views with explicit
   truncation and continuation.
 - **Execution:** structured invocation, lifecycle, limits, results, and errors.
 
@@ -40,56 +40,70 @@ assumptions embedded in the core library.
 - JDK 21 or newer
 - Clojure 1.12 or newer
 
-## Exact-search editing
+## The core loop
+
+The library treats the external world like a reference value. Reading captures
+an immutable Snapshot; writing stages a Changeset and commits it only while its
+remembered basis is still current:
+
+```text
+Selector --snapshot--> Snapshot --render--> prompt
+                                          model
+reply ----parse----> Patches --stage----> Changeset --commit!--> world
+```
+
+`snapshot`, `stage`, and `commit!` perform effects. `render` and `parse` are
+pure representation boundaries. Human or programmatic review belongs between
+`stage` and `commit!`.
+
+## Exact-search patching
 
 `dj.ai.tooling.edit` distills a model-facing editing protocol that uses
 XML-style `<edit>`, `<search>`, and `<replace>` blocks. It supports multiple
-ordered edits, validates the complete plan before writing, rejects missing or
-ambiguous searches, and checks for stale files when applying a plan.
+ordered Patches, validates the complete Changeset before writing, rejects
+missing or ambiguous searches, and compares the filesystem with the staged
+basis when committing.
 
 ```clojure
 (require '[dj.ai.tooling.edit :as edit])
 
-(def edits (edit/parse-response model-response))
-(def plan (edit/plan "." edits))
+(def patches (edit/parse model-response))
+(def changeset (edit/stage "." patches))
 
-;; Inspect :changes or render a diff before choosing to apply.
-(when (= :ready (:status plan))
-  (edit/apply! plan))
+;; Review :basis and :changes before choosing to commit.
+(when (= :ready (:status changeset))
+  (edit/commit! changeset))
 ```
 
 File context is intentionally outside this namespace. Any producer can supply
-path-addressed observations to a model; returned edit blocks join those
-observations by repository-relative path. Clipboard workflows, prompt assembly,
+path-addressed Snapshots to a model; returned Patches join those Snapshots by
+repository-relative path. Clipboard workflows, prompt assembly,
 diff rendering, approval UI, and model invocation belong in consumers or a
 future porcelain layer.
 
-## Whole-file observation
+## Whole-file snapshots
 
-`dj.ai.tooling.observe` separates filesystem requests, loading, and
-model-facing presentation. Loaded observations are ordinary `{:path :content}`
-maps, so callers that already possess content can use the same presentation
-seam without invoking the filesystem loader.
+`dj.ai.tooling.observe` captures source Selectors as immutable Snapshots and
+renders those values as model-facing context. Source identity remains attached
+to its content instead of being reduced to an incidental path.
 
 ```clojure
 (require '[dj.ai.tooling.observe :as observe])
 
-(def plan
-  (observe/plan "."
-                [{:path "src/example/core.clj"}
-                 {:path "README.md"}]
-                {:max-bytes-per-file 50000
-                 :max-total-bytes 100000}))
+(def result
+  (observe/snapshot "."
+                    [{:scheme :file :path "src/example/core.clj"}
+                     {:scheme :file :path "README.md"}]
+                    {:max-bytes-per-file 50000
+                     :max-total-bytes 100000}))
 
-(def result (observe/load plan))
-
-(when (= :observed (:status result))
-  (observe/present (:observations result)))
+(when (= :snapshotted (:status result))
+  (observe/render (:snapshots result)))
 ```
 
-Whole-file loading is the only supported request form. Limits are optional and
-reject the entire load before content is returned; there is intentionally no
-implicit truncation or windowing. Loading also rejects missing files,
+File is currently the only supported Selector scheme. Limits are optional and
+reject the entire snapshot operation before content is returned; there is
+intentionally no implicit truncation or windowing. Snapshotting also rejects missing files,
 non-regular files, lexical path traversal, and symlinks resolving outside the
 configured root.
 
@@ -103,8 +117,8 @@ clojure -T:build jar
 
 ### Manual dogfood workflow
 
-The dev-only terminal app composes the observation and editing primitives with
-bounded filesystem selection, clipboard transport, diff review, and application:
+The dev-only terminal app composes the snapshot and patching primitives with
+bounded filesystem selection, clipboard transport, diff review, and commit:
 
 ```bash
 clojure -M:dogfood
@@ -120,10 +134,10 @@ the current directory, as in `nix develop /path/to/dj.ai.tooling --command ...`.
 Type `help` for commands and a glossary. Add an exact path directly, or use
 `find TERM...` and `take cID...` for Git-independent partial matching. An empty
 `find` lists the first bounded set of files beneath the root. A typical loop is
-selection -> `prompt`, then copy the model response and use `response` ->
-`apply`. `response RESPONSE_FILE` bypasses the clipboard for deterministic
-testing. `response` computes and displays a validated, non-writing edit plan;
-`apply` writes that exact pending plan. Absolute paths inside the root are
+selection -> `prompt`, then copy the model response and use `stage` -> `review`
+-> `commit`. `stage RESPONSE_FILE` bypasses the clipboard for deterministic
+testing. `stage` computes and displays a validated, non-writing Changeset;
+`commit` compares and writes that exact staged Changeset. Absolute paths inside the root are
 normalized, while paths outside it are rejected. The app is an evaluation
 fixture under `dev/`, not public library porcelain.
 
@@ -135,5 +149,5 @@ io.github.bmillare/dj.ai.tooling {:git/sha "<sha>"}
 net.clojars.bmillare/dj.ai.tooling {:mvn/version "0.1.0-alpha1"}
 ```
 
-The next milestone is a minimal manual dogfood workflow around observation and
-editing, followed by refinement from observed model and integration behavior.
+The next milestone is continued dogfooding of snapshots and patching, followed
+by refinement from observed model and integration behavior.

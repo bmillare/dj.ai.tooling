@@ -55,11 +55,11 @@
      :paths (vec (distinct (map #(normalize-path root %) paths)))
      :candidates []
      :limits default-limits
-     :pending-plan nil}))
+     :changeset nil}))
 
 (defn add-path [state path]
   (let [path (normalize-path (:root state) path)]
-    (cond-> (assoc state :pending-plan nil)
+    (cond-> (assoc state :changeset nil)
       (not (some #{path} (:paths state))) (update :paths conj path))))
 
 (defn remove-ids [state ids]
@@ -71,7 +71,7 @@
                         (keep-indexed (fn [index path]
                                         (when-not (removed index) path)))
                         paths)))
-        (assoc :pending-plan nil))))
+        (assoc :changeset nil))))
 
 (defn find-paths
   "Finds cwd-relative regular files containing every case-insensitive term.
@@ -149,30 +149,29 @@
       out
       (throw (ex-info "Clipboard paste failed" {:exit exit :error err})))))
 
-(defn observation-result [{:keys [root paths limits]}]
-  (let [plan (observe/plan root (mapv #(hash-map :path %) paths) limits)]
-    (if (= :ready (:status plan))
-      (observe/load plan)
-      plan)))
+(defn snapshot-result [{:keys [root paths limits]}]
+  (observe/snapshot root
+                    (mapv #(hash-map :scheme :file :path %) paths)
+                    limits))
 
 (defn prompt-result [state]
-  (let [result (observation-result state)]
-    (if (= :observed (:status result))
-      (let [presented (observe/present (:observations result))]
+  (let [result (snapshot-result state)]
+    (if (= :snapshotted (:status result))
+      (let [rendered (observe/render (:snapshots result))]
         {:status :ready
-         :file-count (count (:observations result))
+         :file-count (count (:snapshots result))
          :content-bytes (reduce + (map #(alength (.getBytes ^String (:content %)
                                                             StandardCharsets/UTF_8))
-                                       (:observations result)))
-         :prompt (str edit/instructions presented "```")})
+                                       (:snapshots result)))
+         :prompt (str edit/instructions rendered "```")})
       result)))
 
 (defn- response-text [argument]
   (if (str/blank? argument) (clipboard-paste) (slurp argument)))
 
-(defn- edit-plan [state argument]
-  (edit/plan (:root state)
-             (edit/parse-response (response-text argument))))
+(defn- stage-response [state argument]
+  (edit/stage (:root state)
+              (edit/parse (response-text argument))))
 
 (defn- temp-file [prefix content]
   (let [path (Files/createTempFile prefix ".txt"
@@ -193,10 +192,12 @@
         (Files/deleteIfExists old)
         (Files/deleteIfExists new)))))
 
-(defn- show-plan! [plan]
-  (if (= :ready (:status plan))
-    (doseq [change (:changes plan)] (print-diff! change))
-    (println "Rejected:" (pr-str (:errors plan)))))
+(defn- review! [changeset]
+  (if (= :ready (:status changeset))
+    (let [basis-by-file (into {} (map (juxt :file identity)) (:basis changeset))]
+      (doseq [{:keys [file] :as change} (:changes changeset)]
+        (print-diff! (merge (get basis-by-file file) change))))
+    (println "Rejected:" (pr-str (:errors changeset)))))
 
 (defn- parse-ids [prefix argument]
   (let [tokens (remove str/blank? (str/split (or argument "") #"\s+"))
@@ -225,13 +226,13 @@
              (str scanned " files scanned,")
              (str (count paths) " candidates shown."))))
 
-(defn- print-status! [{:keys [root paths limits pending-plan]}]
+(defn- print-status! [{:keys [root paths limits changeset]}]
   (println "Root:" (str root))
   (println "Context:" (count paths) (if (= 1 (count paths)) "file" "files"))
   (println "Limits:" (pr-str limits))
-  (println "Pending:"
-           (if (= :ready (:status pending-plan))
-             (str (count (:changes pending-plan)) " file change(s)")
+  (println "Staged:"
+           (if (= :ready (:status changeset))
+             (str (count (:changes changeset)) " file change(s)")
              "none")))
 
 (defn- print-help! []
@@ -244,16 +245,17 @@
         "  remove fID...     remove context files by displayed ID\n"
         "  clear             clear context files\n"
         "  prompt            copy the model prompt to clipboard\n"
-        "  response [FILE]   consume response from clipboard or file; plan it\n"
-        "  apply             write the pending, previously reviewed plan\n"
-        "  status            show root, limits, and pending work\n"
+        "  stage [FILE]      parse response from clipboard or file; stage it\n"
+        "  review            show the staged changeset diff again\n"
+        "  commit            commit the reviewed changeset if its basis is current\n"
+        "  status            show root, limits, and staged work\n"
         "  help              show commands\n"
         "  quit              exit\n"
         "\nGlossary:\n"
-        "  context   selected files whose contents go into the model prompt\n"
-        "  response  model output containing XML-style requested edits\n"
-        "  plan      validated proposed file contents, computed without writing\n"
-        "  pending   the exact reviewed plan that `apply` will attempt to write")))
+        "  context    selected files whose snapshots go into the model prompt\n"
+        "  response   model output containing XML-style file patches\n"
+        "  changeset  proposed contents plus the basis they were computed from\n"
+        "  staged     the exact reviewed changeset that `commit` will compare and write")))
 
 (defn- command-parts [line]
   (let [line (str/trim line)]
@@ -286,7 +288,7 @@
       "remove"
       (remove-ids state (parse-ids "f" argument))
       "clear"
-      (assoc state :paths [] :pending-plan nil)
+      (assoc state :paths [] :changeset nil)
       "prompt"
       (let [result (prompt-result state)]
         (if (= :ready (:status result))
@@ -296,24 +298,30 @@
                      (:content-bytes result) "content bytes."))
           (println "Rejected:" (pr-str (:errors result))))
         state)
-      "response"
-      (let [plan (edit-plan state argument)]
-        (show-plan! plan)
-        (if (= :ready (:status plan))
+      "stage"
+      (let [changeset (stage-response state argument)]
+        (review! changeset)
+        (if (= :ready (:status changeset))
           (do
-            (println "Pending:" (count (:changes plan)) "file change(s).")
-            (assoc state :pending-plan plan))
-          (assoc state :pending-plan nil)))
-      "apply"
-      (if (= :ready (-> state :pending-plan :status))
-        (let [result (edit/apply! (:pending-plan state))]
-          (println (if (= :applied (:status result)) "Applied:" "Rejected:")
-                   (pr-str (if (= :applied (:status result))
+            (println "Staged:" (count (:changes changeset)) "file change(s).")
+            (assoc state :changeset changeset))
+          (assoc state :changeset nil)))
+      "review"
+      (do
+        (if (= :ready (-> state :changeset :status))
+          (review! (:changeset state))
+          (println "Nothing staged; run stage first."))
+        state)
+      "commit"
+      (if (= :ready (-> state :changeset :status))
+        (let [result (edit/commit! (:changeset state))]
+          (println (if (= :committed (:status result)) "Committed:" "Rejected:")
+                   (pr-str (if (= :committed (:status result))
                              {:files (mapv :file (:changes result))}
                              (:errors result))))
           (cond-> state
-            (= :applied (:status result)) (assoc :pending-plan nil)))
-        (do (println "Nothing pending; run response first.") state))
+            (= :committed (:status result)) (assoc :changeset nil)))
+        (do (println "Nothing staged; run stage first.") state))
       "status"
       (do (print-status! state) state)
       "help"
@@ -332,8 +340,8 @@
         (println)
         (println (str "Context: " (count (:paths state)) " "
                       (if (= 1 (count (:paths state))) "file" "files")
-                      (when (= :ready (-> state :pending-plan :status))
-                        " — edits pending")))
+                      (when (= :ready (-> state :changeset :status))
+                        " — changes staged")))
         (print "> ")
         (flush)
         (if-let [line (read-line)]
