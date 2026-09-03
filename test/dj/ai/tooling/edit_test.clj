@@ -1,5 +1,6 @@
 (ns dj.ai.tooling.edit-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest is]]
             [dj.ai.tooling.edit :as edit])
   (:import [java.nio.file Files Path]
            [java.nio.file.attribute FileAttribute]))
@@ -221,3 +222,123 @@
         (is (= :ready (:status collision)))
         (is (= :file-changed (-> (edit/commit! collision) :errors first :type)))
         (is (= "hidden\n" (read! root "unseen.txt")))))))
+
+(deftest stage-rejects-unbalanced-clojure-content-by-default
+  (let [root (temp-dir)]
+    (write! root "src/x.clj" "(defn f [x] x)\n")
+    (let [result (edit/stage root [{:file "src/x.clj"
+                                    :search "(defn f [x] x)"
+                                    :replace "(defn f [x] (inc x)"}])]
+      (is (= :rejected (:status result)))
+      (let [error (first (:errors result))]
+        (is (= :invalid-content (:type error)))
+        (is (= :unbalanced-delimiters (:reason error)))
+        (is (= "src/x.clj" (:file error)))
+        (is (not (contains? error :patch-index)))
+        (is (map? (:detail error))))
+      (is (= "(defn f [x] x)\n" (read! root "src/x.clj"))))))
+
+(deftest validation-runs-on-final-content-not-intermediate-states
+  (let [root (temp-dir)]
+    (write! root "a.clj" "(one)\n(two)\n")
+    (is (= :ready
+           (:status (edit/stage root
+                                [{:file "a.clj"
+                                  :search "(one)" :replace "(one"}
+                                 {:file "a.clj"
+                                  :search "(one\n(two)"
+                                  :replace "(one (two))"}]))))))
+
+(deftest empty-validation-rules-turn-validation-off
+  (let [root (temp-dir)]
+    (write! root "a.clj" "(fixture\n")
+    ;; also exercises the 4-arity with nil snapshots meaning a disk basis
+    (is (= :ready
+           (:status (edit/stage root
+                                [{:file "a.clj"
+                                  :search "(fixture" :replace "(fixture more"}]
+                                nil
+                                {:content-validation-rules []}))))))
+
+(deftest only-recognized-extensions-are-validated
+  (let [root (temp-dir)]
+    (doseq [file ["a.txt" "a.cljx" "a.clj.bak"]]
+      (is (= :ready
+             (:status (edit/stage root [{:file file
+                                         :search "" :replace "(unbalanced"}])))
+          file))
+    (doseq [file ["b.clj" "b.cljs" "b.cljc" "b.edn"]]
+      (is (= :invalid-content
+             (-> (edit/stage root [{:file file
+                                    :search "" :replace "(unbalanced"}])
+                 :errors first :type))
+          file))))
+
+(deftest apply-patches-validates-only-when-given-rules
+  (let [basis {"a.clj" {:existed? true :before "(f)\n"}}
+        patches [{:file "a.clj" :search "(f)" :replace "(f"}]]
+    (is (= :ready (:status (edit/apply-patches basis patches))))
+    (is (= :invalid-content
+           (-> (edit/apply-patches
+                basis patches
+                {:content-validation-rules edit/default-validation-rules})
+               :errors first :type)))))
+
+(deftest validates-successful-files-even-when-other-files-fail
+  (let [root (temp-dir)]
+    (write! root "good.clj" "(ok)\n")
+    (write! root "bad.clj" "(text)\n")
+    (let [result (edit/stage root
+                             [{:file "bad.clj" :search "missing" :replace "x"}
+                              {:file "good.clj" :search "(ok)" :replace "(ok"}])]
+      (is (= :rejected (:status result)))
+      ;; patch errors first, then validation errors
+      (is (= [:search-not-found :invalid-content]
+             (mapv :type (:errors result))))
+      (is (= "good.clj" (:file (second (:errors result))))))))
+
+(deftest a-file-whose-own-patches-failed-is-not-validated
+  (let [root (temp-dir)]
+    (write! root "a.clj" "(one)\n")
+    (let [result (edit/stage root
+                             [{:file "a.clj" :search "(one)" :replace "(one"}
+                              {:file "a.clj" :search "missing" :replace "x"}])]
+      ;; the first patch produced unbalanced content, but the file is
+      ;; poisoned by its second patch's error and never validated
+      (is (= [:search-not-found] (mapv :type (:errors result)))))))
+
+(deftest inherited-imbalance-still-rejects-touched-files
+  (let [root (temp-dir)]
+    (write! root "a.clj" "(broken\n(fine)\n")
+    (is (= :invalid-content
+           (-> (edit/stage root [{:file "a.clj"
+                                  :search "(fine)" :replace "(fine 2)"}])
+               :errors first :type)))))
+
+(deftest the-first-matching-validation-rule-wins
+  (let [root (temp-dir)
+        seen (atom [])
+        rules [{:matches? #(str/ends-with? % ".clj")
+                :validators [(fn [content]
+                               (swap! seen conj content)
+                               [])]}
+               {:matches? (constantly true)
+                :validators [(fn [_] [{:reason :should-not-run}])]}]]
+    (write! root "a.clj" "x\n")
+    (is (= :ready
+           (:status (edit/stage root
+                                [{:file "a.clj" :search "x" :replace "y"}]
+                                nil
+                                {:content-validation-rules rules}))))
+    (is (= ["y\n"] @seen))))
+
+(deftest validator-exceptions-propagate-as-configuration-errors
+  (let [root (temp-dir)
+        rules [{:matches? (constantly true)
+                :validators [(fn [_] (throw (ex-info "validator bug" {})))]}]]
+    (write! root "a.clj" "x\n")
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (edit/stage root
+                             [{:file "a.clj" :search "x" :replace "y"}]
+                             nil
+                             {:content-validation-rules rules})))))

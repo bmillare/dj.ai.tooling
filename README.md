@@ -83,6 +83,10 @@ basis when committing.
 ;; Also supported: read the basis from disk at stage time.
 (def changeset (edit/stage "." patches))
 
+;; Options arity (nil snapshots means a disk basis), e.g. to turn
+;; content validation off:
+(def changeset (edit/stage "." patches nil {:content-validation-rules []}))
+
 ;; Review :basis and :changes before choosing to commit.
 (when (= :ready (:status changeset))
   (edit/commit! changeset))
@@ -94,6 +98,21 @@ flowing through the pipeline. A rejected stage carries every independent
 error (Patches after a failed Patch on the same file are not evaluated), so a
 model can repair all problems in one round trip. Staging and committing
 reject lexical path traversal and symlinks resolving outside the root.
+
+Staged content is validated by default: for recognized Clojure-family paths
+(`.clj`, `.cljs`, `.cljc`, `.edn`), each touched file's final content must
+have balanced delimiters or the stage is rejected with `:invalid-content`
+errors carrying line/column detail rich enough for a one-round-trip repair.
+The check is `dj.ai.tooling.validate/balanced-delimiters`, a pure lexical
+scanner that understands strings, comments, character literals, and regex
+literals; it promises delimiter balance only — balanced does not imply
+readable, and readable does not imply compilable. Validation runs once per
+touched file after all its patches apply, never on intermediate states, and
+untouched files are never scanned. Pass `:content-validation-rules` in
+`stage`'s options arity to replace the default rules (`[]` disables;
+overrides replace rather than merge — append to
+`edit/default-validation-rules` to extend it). `apply-patches` never
+validates unless rules are supplied explicitly.
 
 File context is intentionally outside this namespace. Any producer can supply
 path-addressed Snapshots to a model; returned Patches join those Snapshots by

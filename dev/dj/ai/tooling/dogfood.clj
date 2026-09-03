@@ -50,7 +50,8 @@
      :candidates []
      :limits default-limits
      :snapshots nil
-     :changeset nil}))
+     :changeset nil
+     :validation-rejections 0}))
 
 (defn add-path [state path]
   (let [path (normalize-path (:root state) path)]
@@ -228,7 +229,8 @@
              (str scanned " files scanned,")
              (str (count paths) " candidates shown."))))
 
-(defn- print-status! [{:keys [root paths limits snapshots changeset]}]
+(defn- print-status! [{:keys [root paths limits snapshots changeset]
+                       :as state}]
   (println "Root:" (str root))
   (println "Context:" (count paths) (if (= 1 (count paths)) "file" "files"))
   (println "Limits:" (pr-str limits))
@@ -236,10 +238,19 @@
            (if snapshots
              (str (count snapshots) " snapshot file(s) from the last prompt")
              "disk (no prompt taken)"))
+  (println "Validation rejections:" (:validation-rejections state 0))
   (println "Staged:"
            (if (= :ready (:status changeset))
              (str (count (:changes changeset)) " file change(s)")
              "none")))
+
+(defn- print-validation-rejections! [state changeset]
+  (let [invalid (count (filter #(= :invalid-content (:type %))
+                               (:errors changeset)))]
+    (when (pos? invalid)
+      (println "Content validation rejected" invalid "file(s);"
+               (:validation-rejections state)
+               "validation rejection(s) this session."))))
 
 (defn- print-help! []
   (println
@@ -307,8 +318,12 @@
           (do (println "Rejected:" (pr-str (:errors result)))
               state)))
       "stage"
-      (let [changeset (stage-response state argument)]
+      (let [changeset (stage-response state argument)
+            invalid? (some #(= :invalid-content (:type %)) (:errors changeset))
+            state (cond-> state
+                    invalid? (update :validation-rejections (fnil inc 0)))]
         (review! changeset)
+        (print-validation-rejections! state changeset)
         (if (= :ready (:status changeset))
           (do
             (println "Staged:" (count (:changes changeset)) "file change(s).")

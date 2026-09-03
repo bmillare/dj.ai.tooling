@@ -17,6 +17,14 @@
 (s/def ::patch (s/keys :req-un [::file ::search ::replace]))
 (s/def ::patches (s/coll-of ::patch))
 
+;; Content validation rule — ordered; the first :matches? hit selects the
+;; rule, whose :validators then run in order over a file's final content.
+(s/def ::matches? ifn?)
+(s/def ::validators (s/coll-of ifn? :kind vector?))
+(s/def ::validation-rule (s/keys :req-un [::matches? ::validators]))
+(s/def ::content-validation-rules
+  (s/coll-of ::validation-rule :kind vector?))
+
 ;; Selector — an addressable source to observe.
 (s/def ::scheme #{:file})
 (s/def ::path ::relative-path)

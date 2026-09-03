@@ -115,6 +115,24 @@
           (is (some? (:changeset after)))
           (is (= "drifted\n" (Files/readString target))))))))
 
+(deftest stage-counts-content-validation-rejections
+  (let [root (temp-dir)
+        target (.resolve root "t.clj")
+        response (.resolve root "response.txt")]
+    (Files/writeString target "(ok)\n" (make-array java.nio.file.OpenOption 0))
+    (Files/writeString
+     response
+     (str "<edit file=\"t.clj\">\n"
+          "<search>\n(ok)\n</search>\n"
+          "<replace>\n(ok\n</replace>\n"
+          "</edit>\n")
+     (make-array java.nio.file.OpenOption 0))
+    (let [state (dogfood/initial-state root [])
+          staged (dogfood/execute-command state (str "stage " response))]
+      (is (nil? (:changeset staged)))
+      (is (= 1 (:validation-rejections staged)))
+      (is (= "(ok)\n" (Files/readString target))))))
+
 (deftest filesystem-find-and-take-are-git-independent
   (let [root (temp-dir)]
     (Files/createDirectories (.resolve root "notes")
