@@ -89,6 +89,32 @@
         (is (nil? (:changeset committed)))
         (is (= "after\n" (Files/readString target)))))))
 
+(deftest stage-uses-the-last-prompt-snapshots-as-basis
+  (let [root (temp-dir)
+        target (.resolve root "target.txt")
+        response (.resolve root "response.txt")]
+    (Files/writeString target "v1\n" (make-array java.nio.file.OpenOption 0))
+    (Files/writeString
+     response
+     (str "<edit file=\"target.txt\">\n"
+          "<search>\nv1\n</search>\n"
+          "<replace>\nv2\n</replace>\n"
+          "</edit>\n")
+     (make-array java.nio.file.OpenOption 0))
+    (let [state (dogfood/initial-state root ["target.txt"])
+          snapshotted (dogfood/snapshot-result state)
+          state (assoc state :snapshots (:snapshots snapshotted))]
+      ;; the world drifts after the model saw its snapshot
+      (Files/writeString target "drifted\n"
+                         (make-array java.nio.file.OpenOption 0))
+      (let [staged (dogfood/execute-command state (str "stage " response))]
+        ;; staging applies against the snapshot the model saw, not the disk
+        (is (= :ready (-> staged :changeset :status)))
+        (let [after (dogfood/execute-command staged "commit")]
+          ;; the commit compare-and-set rejects the drifted world
+          (is (some? (:changeset after)))
+          (is (= "drifted\n" (Files/readString target))))))))
+
 (deftest filesystem-find-and-take-are-git-independent
   (let [root (temp-dir)]
     (Files/createDirectories (.resolve root "notes")

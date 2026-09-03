@@ -87,9 +87,6 @@
   (let [root (temp-dir)]
     (is (= :no-selectors
            (-> (observe/snapshot root []) :errors first :type)))
-    (is (= :unsupported-selector-shape
-           (-> (observe/snapshot root [{:scheme :file :path "a" :lines [1 2]}])
-               :errors first :reason)))
     (is (= :unsupported-scheme
            (-> (observe/snapshot root [{:scheme :sql :query "select 1"}])
                :errors first :reason)))
@@ -97,6 +94,37 @@
            (-> (observe/snapshot root [{:scheme :file :path "a"}]
                                  {:max-total-bytes 0})
                :errors first :reason)))))
+
+(deftest tolerates-unknown-selector-keys
+  (let [root (temp-dir)]
+    (write! root "a.txt" "x")
+    (let [result (observe/snapshot root [{:scheme :file :path "a.txt"
+                                          :lines [1 2]}])]
+      (is (= :snapshotted (:status result)))
+      (is (= {:scheme :file :path "a.txt" :lines [1 2]}
+             (-> result :snapshots first :source))))))
+
+(deftest accumulates-independent-errors
+  (let [root (temp-dir)]
+    (write! root "big.txt" "12345")
+    (write! root "big2.txt" "123")
+    (is (= [:invalid-path :invalid-selector]
+           (mapv :type (:errors (observe/snapshot
+                                 root
+                                 [{:scheme :file :path "../out"}
+                                  {:scheme :sql :query "select 1"}])))))
+    (is (= [:file-not-found :file-not-found]
+           (mapv :type (:errors (observe/snapshot
+                                 root
+                                 [{:scheme :file :path "missing-a"}
+                                  {:scheme :file :path "missing-b"}])))))
+    (is (= [:max-bytes-per-file :max-bytes-per-file :max-total-bytes]
+           (mapv :limit (:errors (observe/snapshot
+                                  root
+                                  [{:scheme :file :path "big.txt"}
+                                   {:scheme :file :path "big2.txt"}]
+                                  {:max-bytes-per-file 2
+                                   :max-total-bytes 4})))))))
 
 (deftest escapes-paths-when-rendering-snapshots
   (is (= "<file path=\"a&amp;&quot;&lt;b&gt;\">\nx\n</file>\n"

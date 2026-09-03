@@ -56,6 +56,13 @@ reply ----parse----> Patches --stage----> Changeset --commit!--> world
 pure representation boundaries. Human or programmatic review belongs between
 `stage` and `commit!`.
 
+When `stage` is given the Snapshots the model saw, they become the Changeset's
+basis: Patches are applied against the Snapshot contents rather than a fresh
+disk read, and `commit!` compares the world with what the model actually
+observed — closing the snapshot-to-commit window rather than only the
+stage-to-commit window. The pure core is exposed as `edit/apply-patches`,
+which transforms basis values into a Changeset with no I/O at all.
+
 ## Exact-search patching
 
 `dj.ai.tooling.edit` distills a model-facing editing protocol that uses
@@ -68,12 +75,25 @@ basis when committing.
 (require '[dj.ai.tooling.edit :as edit])
 
 (def patches (edit/parse model-response))
+
+;; Preferred: stage against the Snapshots that were rendered into the prompt,
+;; so the basis is exactly what the model saw.
+(def changeset (edit/stage "." patches (:snapshots snapshot-result)))
+
+;; Also supported: read the basis from disk at stage time.
 (def changeset (edit/stage "." patches))
 
 ;; Review :basis and :changes before choosing to commit.
 (when (= :ready (:status changeset))
   (edit/commit! changeset))
 ```
+
+Patch maps are open: the required `:file`, `:search`, and `:replace` keys are
+validated and unknown keys are ignored, so consumers can decorate Patches
+flowing through the pipeline. A rejected stage carries every independent
+error (Patches after a failed Patch on the same file are not evaluated), so a
+model can repair all problems in one round trip. Staging and committing
+reject lexical path traversal and symlinks resolving outside the root.
 
 File context is intentionally outside this namespace. Any producer can supply
 path-addressed Snapshots to a model; returned Patches join those Snapshots by
@@ -105,7 +125,26 @@ File is currently the only supported Selector scheme. Limits are optional and
 reject the entire snapshot operation before content is returned; there is
 intentionally no implicit truncation or windowing. Snapshotting also rejects missing files,
 non-regular files, lexical path traversal, and symlinks resolving outside the
-configured root.
+configured root. Selector maps are open — required keys are validated,
+unknown keys are ignored — and a rejected snapshot carries every independent
+error.
+
+## Data contracts
+
+`dj.ai.tooling.specs` describes the Patch, Selector, Snapshot, and Changeset
+shapes with `clojure.spec` for documentation, instrumentation, and
+generation. The runtime validation inside `edit` and `observe` does not
+depend on it.
+
+## Known limitations
+
+- `commit!` writes files sequentially and is not atomic across a multi-file
+  Changeset: a failure mid-write leaves earlier files committed.
+- `commit!` has an unavoidable window between comparing the basis and
+  writing; the compare-and-set protects against staleness, not against a
+  concurrent writer racing the write itself.
+- `snapshot` checks byte limits before reading content, so a file growing
+  between the size check and the read can exceed the configured limit.
 
 ## Development
 
@@ -136,8 +175,11 @@ Type `help` for commands and a glossary. Add an exact path directly, or use
 `find` lists the first bounded set of files beneath the root. A typical loop is
 selection -> `prompt`, then copy the model response and use `stage` -> `review`
 -> `commit`. `stage RESPONSE_FILE` bypasses the clipboard for deterministic
-testing. `stage` computes and displays a validated, non-writing Changeset;
-`commit` compares and writes that exact staged Changeset. Absolute paths inside the root are
+testing. `stage` computes and displays a validated, non-writing Changeset,
+staging against the Snapshots captured by the most recent `prompt` when one
+was taken (so `commit` compares the world with what the model saw) and
+against the disk otherwise; `commit` compares and writes that exact staged
+Changeset. Absolute paths inside the root are
 normalized, while paths outside it are rejected. The app is an evaluation
 fixture under `dev/`, not public library porcelain.
 

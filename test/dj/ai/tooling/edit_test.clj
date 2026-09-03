@@ -116,3 +116,108 @@
   (let [result (edit/stage (temp-dir) [])]
     (is (= :rejected (:status result)))
     (is (= :no-patches (-> result :errors first :type)))))
+
+(deftest tolerates-unknown-patch-keys
+  (let [root (temp-dir)]
+    (write! root "a.txt" "old\n")
+    (is (= :ready
+           (:status (edit/stage root [{:file "a.txt" :search "old"
+                                       :replace "new" :provenance :model}]))))))
+
+(deftest accumulates-independent-errors-and-skips-poisoned-files
+  (let [root (temp-dir)]
+    (write! root "a.txt" "content\n")
+    (let [result (edit/stage root
+                             [{:file "a.txt" :search "missing" :replace "x"}
+                              {:file "../outside.txt" :search "" :replace "y"}
+                              {:file "a.txt" :search "also-missing" :replace "z"}])]
+      (is (= :rejected (:status result)))
+      (is (= [:search-not-found :invalid-path]
+             (mapv :type (:errors result)))))))
+
+(deftest rejects-symlinks-that-escape-the-real-root
+  (let [root (temp-dir)
+        outside-file (Files/createTempFile "dj-ai-tooling-edit-outside-" ".txt"
+                                           (make-array FileAttribute 0))
+        outside-dir (Files/createTempDirectory "dj-ai-tooling-edit-outdir-"
+                                               (make-array FileAttribute 0))]
+    (Files/writeString outside-file "secret"
+                       (make-array java.nio.file.OpenOption 0))
+    (Files/createSymbolicLink (.resolve root "escape.txt") outside-file
+                              (make-array FileAttribute 0))
+    (Files/createSymbolicLink (.resolve root "escape-dir") outside-dir
+                              (make-array FileAttribute 0))
+    (is (= :outside-real-root
+           (-> (edit/stage root [{:file "escape.txt"
+                                  :search "secret" :replace "changed"}])
+               :errors first :reason)))
+    (is (= :outside-real-root
+           (-> (edit/stage root [{:file "escape-dir/new.txt"
+                                  :search "" :replace "created\n"}])
+               :errors first :reason)))
+    (is (= "secret" (Files/readString outside-file)))))
+
+(deftest apply-patches-is-pure-over-basis-values
+  (let [result (edit/apply-patches
+                {"a.txt" {:existed? true :before "one two\n"}}
+                [{:file "a.txt" :search "two" :replace "three"}
+                 {:file "b.txt" :search "" :replace "new\n"}])]
+    (is (= :ready (:status result)))
+    (is (= [{:file "a.txt" :existed? true :before "one two\n"}
+            {:file "b.txt" :existed? false :before nil}]
+           (:basis result)))
+    (is (= [{:file "a.txt" :after "one three\n"}
+            {:file "b.txt" :after "new\n"}]
+           (:changes result)))))
+
+(deftest stages-against-snapshot-basis-and-commits-while-current
+  (let [root (temp-dir)]
+    (write! root "a.txt" "v1\n")
+    (let [snapshots [{:source {:scheme :file :path "a.txt"} :content "v1\n"}]
+          changeset (edit/stage root
+                                [{:file "a.txt" :search "v1" :replace "v2"}]
+                                snapshots)]
+      (is (= :ready (:status changeset)))
+      (is (= "v1\n" (-> changeset :basis first :before)))
+      (is (= :committed (:status (edit/commit! changeset))))
+      (is (= "v2\n" (read! root "a.txt"))))))
+
+(deftest snapshot-basis-commit-rejects-drift-since-the-snapshot
+  (let [root (temp-dir)]
+    (write! root "a.txt" "v1\n")
+    (let [snapshots [{:source {:scheme :file :path "a.txt"} :content "v1\n"}]]
+      (write! root "a.txt" "someone else\n")
+      (let [changeset (edit/stage root
+                                  [{:file "a.txt" :search "v1" :replace "v2"}]
+                                  snapshots)]
+        (is (= :ready (:status changeset)))
+        (let [result (edit/commit! changeset)]
+          (is (= :rejected (:status result)))
+          (is (= :content-changed (-> result :errors first :reason)))
+          (is (= "someone else\n" (read! root "a.txt"))))))))
+
+(deftest snapshot-basis-limits-edits-to-what-the-model-saw
+  (let [root (temp-dir)]
+    (write! root "seen.txt" "hello\n")
+    (write! root "unseen.txt" "hidden\n")
+    (let [snapshots [{:source {:scheme :file :path "seen.txt"}
+                      :content "hello\n"}]]
+      (is (= :file-not-in-basis
+             (-> (edit/stage root [{:file "unseen.txt"
+                                    :search "hidden" :replace "x"}]
+                             snapshots)
+                 :errors first :type)))
+      ;; creating a genuinely new file is allowed without being in the basis
+      (let [changeset (edit/stage root [{:file "new.txt"
+                                         :search "" :replace "created\n"}]
+                                  snapshots)]
+        (is (= :ready (:status changeset)))
+        (is (= :committed (:status (edit/commit! changeset))))
+        (is (= "created\n" (read! root "new.txt"))))
+      ;; creation colliding with an unseen existing file fails the commit CAS
+      (let [collision (edit/stage root [{:file "unseen.txt"
+                                         :search "" :replace "x\n"}]
+                                  snapshots)]
+        (is (= :ready (:status collision)))
+        (is (= :file-changed (-> (edit/commit! collision) :errors first :type)))
+        (is (= "hidden\n" (read! root "unseen.txt")))))))

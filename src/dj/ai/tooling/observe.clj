@@ -1,9 +1,10 @@
 (ns dj.ai.tooling.observe
   "Bounded snapshots and model-facing rendering."
-  (:require [clojure.java.io :as io]
-            [clojure.string :as str])
-  (:import [java.nio.file Files LinkOption Path Paths]))
+  (:require [clojure.string :as str]
+            [dj.ai.tooling.path :as path])
+  (:import [java.nio.file Files LinkOption Path]))
 
+(def ^:private no-link-options (make-array LinkOption 0))
 (def ^:private supported-options #{:max-bytes-per-file :max-total-bytes})
 
 (defn- invalid-selector [selector-index selector reason]
@@ -14,29 +15,19 @@
   {:type :invalid-path :selector-index selector-index :source selector
    :path (when (map? selector) (:path selector)) :reason reason})
 
-(defn- resolve-file [^Path root selector-index selector]
-  (let [path (:path selector)]
-    (cond
-      (not (string? path)) {:error (path-error selector-index selector :not-a-string)}
-      (str/blank? path) {:error (path-error selector-index selector :blank)}
-      :else
-      (let [relative (Paths/get path (make-array String 0))
-            target (.normalize (.resolve root relative))]
-        (cond
-          (.isAbsolute relative) {:error (path-error selector-index selector :absolute)}
-          (not (.startsWith target root)) {:error (path-error selector-index selector :outside-root)}
-          :else {:target target})))))
-
-(defn- resolve-selector [root selector-index selector]
+(defn- resolve-selector
+  "Validates the required Selector keys; unknown keys are ignored."
+  [root selector-index selector]
   (cond
     (not (map? selector))
     {:error (invalid-selector selector-index selector :not-a-map)}
     (not= :file (:scheme selector))
     {:error (invalid-selector selector-index selector :unsupported-scheme)}
-    (not= #{:scheme :path} (set (keys selector)))
-    {:error (invalid-selector selector-index selector :unsupported-selector-shape)}
     :else
-    (resolve-file root selector-index selector)))
+    (let [{:keys [target error]} (path/resolve-under root (:path selector))]
+      (if error
+        {:error (path-error selector-index selector error)}
+        {:target target}))))
 
 (defn- options-error [options]
   (cond
@@ -51,73 +42,78 @@
                :option option :value value}))
           options)))
 
-(defn- inspect-file [^Path real-root {:keys [selector ^Path target]}]
-  (let [path (:path selector)]
-    (cond
-      (not (Files/exists target (make-array LinkOption 0)))
-      {:error {:type :file-not-found :source selector :path path}}
-      :else
-      (let [real-target (.toRealPath target (make-array LinkOption 0))]
+(defn- inspect-file [^Path root {:keys [selector ^Path target]}]
+  (let [file (:path selector)]
+    (if-not (path/exists? target)
+      {:error {:type :file-not-found :source selector :path file}}
+      (let [{:keys [^Path target error]} (path/realize root target)]
         (cond
-          (not (.startsWith real-target real-root))
-          {:error {:type :invalid-path :source selector :path path
-                   :reason :outside-real-root}}
-          (not (Files/isRegularFile real-target (make-array LinkOption 0)))
-          {:error {:type :not-a-regular-file :source selector :path path}}
+          error
+          {:error {:type :invalid-path :source selector :path file :reason error}}
+          (not (Files/isRegularFile target no-link-options))
+          {:error {:type :not-a-regular-file :source selector :path file}}
           :else
-          {:entry {:source selector :target real-target
-                   :bytes (Files/size real-target)}})))))
+          {:entry {:source selector :target target :bytes (Files/size target)}})))))
 
-(defn- limit-error [entries limits]
-  (or
-   (when-let [limit (:max-bytes-per-file limits)]
-     (some (fn [{:keys [source bytes]}]
-             (when (> bytes limit)
-               {:type :limit-exceeded :limit :max-bytes-per-file
-                :source source :path (:path source)
-                :maximum limit :actual bytes}))
-           entries))
+(defn- limit-errors [entries limits]
+  (into
+   (if-let [limit (:max-bytes-per-file limits)]
+     (into []
+           (keep (fn [{:keys [source bytes]}]
+                   (when (> bytes limit)
+                     {:type :limit-exceeded :limit :max-bytes-per-file
+                      :source source :path (:path source)
+                      :maximum limit :actual bytes})))
+           entries)
+     [])
    (when-let [limit (:max-total-bytes limits)]
      (let [total (reduce + (map :bytes entries))]
        (when (> total limit)
-         {:type :limit-exceeded :limit :max-total-bytes
-          :maximum limit :actual total})))))
+         [{:type :limit-exceeded :limit :max-total-bytes
+           :maximum limit :actual total}])))))
+
+(defn- resolve-selectors [root selectors]
+  (reduce (fn [acc [selector-index selector]]
+            (let [selector-key (when (map? selector)
+                                 [(:scheme selector) (:path selector)])]
+              (if (and selector-key (contains? (:seen acc) selector-key))
+                (update acc :errors conj
+                        {:type :duplicate-selector
+                         :selector-index selector-index :source selector})
+                (let [{:keys [target error]}
+                      (resolve-selector root selector-index selector)]
+                  (cond-> acc
+                    selector-key (update :seen conj selector-key)
+                    error (update :errors conj error)
+                    target (update :resolved conj
+                                   {:selector selector :target target}))))))
+          {:seen #{} :resolved [] :errors []}
+          (map-indexed vector selectors)))
 
 (defn snapshot
   "Captures ordered whole-file Selectors beneath `root` as immutable Snapshots.
 
-  A file Selector is `{:scheme :file :path relative-path}`. Optional byte
-  limits reject the entire capture before any content is returned."
+  A file Selector is `{:scheme :file :path relative-path}`; unknown Selector
+  keys are ignored. Optional byte limits reject the entire capture before any
+  content is returned. A rejected result carries every independent error."
   ([root selectors] (snapshot root selectors {}))
   ([root selectors options]
-   (let [^Path root-path (if (instance? Path root) root (.toPath (io/file root)))
-         root-path (.normalize (.toAbsolutePath root-path))]
+   (let [root-path (path/to-root root)]
      (if-let [error (options-error options)]
        {:status :rejected :errors [error]}
        (if-not (seq selectors)
          {:status :rejected :errors [{:type :no-selectors}]}
-         (loop [remaining (seq (map-indexed vector selectors))
-                seen #{}
-                resolved []]
-           (if-let [[selector-index selector] (first remaining)]
-             (let [identity (when (map? selector) [(:scheme selector) (:path selector)])]
-               (if (contains? seen identity)
-                 {:status :rejected
-                  :errors [{:type :duplicate-selector
-                            :selector-index selector-index :source selector}]}
-                 (let [{:keys [target error]}
-                       (resolve-selector root-path selector-index selector)]
-                   (if error
-                     {:status :rejected :errors [error]}
-                     (recur (next remaining) (conj seen identity)
-                            (conj resolved {:selector selector :target target}))))))
-             (let [real-root (.toRealPath root-path (make-array LinkOption 0))
-                   inspected (mapv #(inspect-file real-root %) resolved)]
-               (if-let [error (some :error inspected)]
-                 {:status :rejected :errors [error]}
-                 (let [entries (mapv :entry inspected)]
-                   (if-let [error (limit-error entries options)]
-                     {:status :rejected :errors [error]}
+         (let [{:keys [resolved errors]} (resolve-selectors root-path selectors)]
+           (if (seq errors)
+             {:status :rejected :errors errors}
+             (let [inspected (mapv #(inspect-file root-path %) resolved)
+                   errors (into [] (keep :error) inspected)]
+               (if (seq errors)
+                 {:status :rejected :errors errors}
+                 (let [entries (mapv :entry inspected)
+                       errors (limit-errors entries options)]
+                   (if (seq errors)
+                     {:status :rejected :errors errors}
                      {:status :snapshotted
                       :snapshots
                       (mapv (fn [{:keys [source ^Path target]}]
@@ -134,11 +130,11 @@
 (defn render
   "Renders ordered Snapshots as model-facing context."
   [snapshots]
-  (apply str
-         (map (fn [{:keys [source] :as snapshot}]
-                (case (:scheme source)
-                  :file (render-file snapshot)
-                  (throw (ex-info "Unsupported Snapshot scheme"
-                                  {:type :unsupported-snapshot-scheme
-                                   :source source}))))
-              snapshots)))
+  (str/join
+   (map (fn [{:keys [source] :as snap}]
+          (case (:scheme source)
+            :file (render-file snap)
+            (throw (ex-info "Unsupported Snapshot scheme"
+                            {:type :unsupported-snapshot-scheme
+                             :source source}))))
+        snapshots)))

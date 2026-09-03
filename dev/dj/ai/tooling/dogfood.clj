@@ -3,7 +3,8 @@
   (:require [clojure.java.shell :as shell]
             [clojure.string :as str]
             [dj.ai.tooling.edit :as edit]
-            [dj.ai.tooling.observe :as observe])
+            [dj.ai.tooling.observe :as observe]
+            [dj.ai.tooling.path :as path])
   (:gen-class)
   (:import [java.nio.charset StandardCharsets]
            [java.nio.file FileVisitResult Files Path Paths SimpleFileVisitor]
@@ -18,13 +19,6 @@
 (def ^:private skipped-directory-names
   #{".git" ".hg" ".svn" ".cpcache" ".direnv" "node_modules" "target"})
 
-(defn- root-path [root]
-  (-> (if (instance? Path root)
-        root
-        (Paths/get (str root) (make-array String 0)))
-      .toAbsolutePath
-      .normalize))
-
 (defn- remove-outer-quotes [value]
   (if (and (<= 2 (count value))
            (= (first value) (last value))
@@ -35,7 +29,7 @@
 (defn normalize-path
   "Normalizes an exact relative or absolute input path beneath root."
   [root input]
-  (let [^Path root (root-path root)
+  (let [^Path root (path/to-root root)
         input (-> input str/trim remove-outer-quotes)]
     (when (str/blank? input)
       (throw (ex-info "Path is empty" {:type :invalid-path :reason :blank})))
@@ -50,11 +44,12 @@
       (str (.relativize root target)))))
 
 (defn initial-state [root paths]
-  (let [root (root-path root)]
+  (let [root (path/to-root root)]
     {:root root
      :paths (vec (distinct (map #(normalize-path root %) paths)))
      :candidates []
      :limits default-limits
+     :snapshots nil
      :changeset nil}))
 
 (defn add-path [state path]
@@ -77,7 +72,7 @@
   "Finds cwd-relative regular files containing every case-insensitive term.
   Traversal and returned candidates are bounded for interactive use."
   [root terms]
-  (let [^Path root (root-path root)
+  (let [^Path root (path/to-root root)
         terms (mapv str/lower-case terms)
         scanned (atom 0)
         matches (atom [])
@@ -163,15 +158,22 @@
          :content-bytes (reduce + (map #(alength (.getBytes ^String (:content %)
                                                             StandardCharsets/UTF_8))
                                        (:snapshots result)))
+         :snapshots (:snapshots result)
          :prompt (str edit/instructions rendered "```")})
       result)))
 
 (defn- response-text [argument]
   (if (str/blank? argument) (clipboard-paste) (slurp argument)))
 
-(defn- stage-response [state argument]
-  (edit/stage (:root state)
-              (edit/parse (response-text argument))))
+(defn- stage-response
+  "Stages the parsed response against the last prompt's Snapshots when
+  present, so commit compares the world with what the model saw; falls back
+  to a disk basis when no prompt was taken."
+  [state argument]
+  (let [patches (edit/parse (response-text argument))]
+    (if-let [snapshots (:snapshots state)]
+      (edit/stage (:root state) patches snapshots)
+      (edit/stage (:root state) patches))))
 
 (defn- temp-file [prefix content]
   (let [path (Files/createTempFile prefix ".txt"
@@ -226,10 +228,14 @@
              (str scanned " files scanned,")
              (str (count paths) " candidates shown."))))
 
-(defn- print-status! [{:keys [root paths limits changeset]}]
+(defn- print-status! [{:keys [root paths limits snapshots changeset]}]
   (println "Root:" (str root))
   (println "Context:" (count paths) (if (= 1 (count paths)) "file" "files"))
   (println "Limits:" (pr-str limits))
+  (println "Basis:"
+           (if snapshots
+             (str (count snapshots) " snapshot file(s) from the last prompt")
+             "disk (no prompt taken)"))
   (println "Staged:"
            (if (= :ready (:status changeset))
              (str (count (:changes changeset)) " file change(s)")
@@ -246,6 +252,7 @@
         "  clear             clear context files\n"
         "  prompt            copy the model prompt to clipboard\n"
         "  stage [FILE]      parse response from clipboard or file; stage it\n"
+        "                    (against the last prompt's snapshots when taken)\n"
         "  review            show the staged changeset diff again\n"
         "  commit            commit the reviewed changeset if its basis is current\n"
         "  status            show root, limits, and staged work\n"
@@ -295,9 +302,10 @@
           (do
             (clipboard-copy! (:prompt result))
             (println "Prompt copied:" (:file-count result) "file(s),"
-                     (:content-bytes result) "content bytes."))
-          (println "Rejected:" (pr-str (:errors result))))
-        state)
+                     (:content-bytes result) "content bytes.")
+            (assoc state :snapshots (:snapshots result)))
+          (do (println "Rejected:" (pr-str (:errors result)))
+              state)))
       "stage"
       (let [changeset (stage-response state argument)]
         (review! changeset)
@@ -332,7 +340,7 @@
 
 (defn -main [& paths]
   (try
-    (let [root (root-path (Path/of "." (make-array String 0)))]
+    (let [root (path/to-root ".")]
       (println "dj.ai.tooling dogfood")
       (println "Root:" (str root))
       (println "Type `find`, `find TERM`, `add PATH`, or `help`.")
