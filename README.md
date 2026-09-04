@@ -257,3 +257,20 @@ net.clojars.bmillare/dj.ai.tooling {:mvn/version "0.1.0-alpha1"}
 
 The next milestone is continued dogfooding of snapshots and patching, followed
 by refinement from observed model and integration behavior.
+
+### Progress graph builder
+
+The dev-only graph builder manually exercises the progress core with an
+in-process atom as its temporary persistence boundary:
+
+```bash
+nix develop --command clojure -M:graph-builder
+```
+
+Open `http://localhost:8080` (or set `PORT`). The UI uses dj.web's
+current-state Datastar shape: commands commit graph state and return `204`, one
+long-lived subscription re-renders the full `<main>`, and browser signals hold
+only form drafts. It supports roots, one-parent spawns, resolution and pinning
+on creation, and status transitions. The core itself continues to support
+multi-parent joins; the narrower editor is an intentional first evaluation
+surface. Restarting the process clears the graph.

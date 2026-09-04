@@ -8,6 +8,12 @@
   {:extra-paths ["dev"]
    :main-opts ["-m" "dj.ai.tooling.dogfood"]}
 
+  :graph-builder
+  {:extra-paths ["dev"]
+   :extra-deps {io.github.bmillare/dj.web
+                {:git/sha "518b6fe21cf020af2cd21c27d2ac84707344c13c"}}
+   :main-opts ["-m" "dj.ai.tooling.progress-builder"]}
+
   :nrepl
   {:extra-deps {nrepl/nrepl {:mvn/version "1.5.1"}}
    :extra-paths ["dev" "test"]
@@ -15,10 +21,11 @@
 
   :test
   {:extra-paths ["dev" "test"]
-   :extra-deps {io.github.cognitect-labs/test-runner
+   :extra-deps {io.github.bmillare/dj.web
+                {:git/sha "518b6fe21cf020af2cd21c27d2ac84707344c13c"}
+                io.github.cognitect-labs/test-runner
                 {:git/tag "v0.5.1" :git/sha "dfb30dd"}
                 org.clojure/data.json {:mvn/version "2.5.2"}}
-   
    :main-opts ["-m" "cognitect.test-runner"]
    :exec-fn cognitect.test-runner.api/test}
 
