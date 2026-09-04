@@ -6,6 +6,39 @@ Curated tooling patterns for Clojure agent harnesses.
 > primitives are available for manual evaluation; their APIs may change as
 > usage evidence accumulates.
 
+## Progress graphs
+
+`dj.ai.tooling.progress` is a minimal, persistence-independent core for
+tracking understanding and activity as a graph. Its four node kinds are
+`:done`, `:know`, `:to-know`, and `:to-do`. Spawn edges preserve provenance;
+resolution edges explicitly close a question or action without erasing its
+history.
+
+```clojure
+(require '[dj.ai.tooling.progress :as progress])
+
+(def graph
+  (-> (progress/empty-graph)
+      (progress/add-node
+       {:id :question
+        :kind :to-know
+        :body "What is the smallest useful graph contract?"
+        :created-at #inst "2026-09-04"})
+      (progress/spawn
+       [:question]
+       {:id :work
+        :kind :to-do
+        :body "Exercise the contract against real work."
+        :created-at #inst "2026-09-04"})))
+
+(progress/frontier graph)
+;; => {:to-knows [...], :to-dos [...], :unsynthesized-dones [...]}
+```
+
+Callers provide ids and timestamps, so graph updates and queries are
+deterministic. The namespace deliberately does not choose storage, clocks,
+ranking policy, Markdown rendering, or a UI contract yet.
+
 ## Motivation
 
 A conventional tool call is only one way for a language model to interact with
