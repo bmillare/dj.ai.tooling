@@ -267,7 +267,7 @@ in-process atom as its temporary persistence boundary:
 nix develop --command clojure -M:graph-builder
 ```
 
-Open `http://localhost:8080` (or set `PORT`). The UI uses dj.web's
+Open `http://localhost:9090` (or set `PORT`). The UI uses dj.web's
 current-state Datastar shape: commands commit graph state and return `204`, one
 long-lived subscription re-renders the full `<main>`, and browser signals hold
 only form drafts. It supports roots, one-parent spawns, resolution and pinning

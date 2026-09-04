@@ -2,7 +2,7 @@
   "Dev-only Datastar UI for manually exercising progress graphs.
 
   Start with `nix develop --command clojure -M:graph-builder`, then open
-  http://localhost:8080. The atom is intentionally the persistence boundary."
+  http://localhost:9090. The atom is intentionally the persistence boundary."
   (:require [clojure.string :as str]
             [dj.ai.tooling.progress :as progress]
             [dj.web.datastar.assets :as assets]
@@ -229,7 +229,7 @@
     response/not-found))
 
 (defn -main [& _]
-  (let [port (parse-long (or (System/getenv "PORT") "8080"))
+  (let [port (parse-long (or (System/getenv "PORT") "9090"))
         server (http/start! #'app {:port port})]
     (.addShutdownHook (Runtime/getRuntime) (Thread. #(http/stop! server)))
     (println (str "progress graph builder: http://localhost:" (http/port server)))
