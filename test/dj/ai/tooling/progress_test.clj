@@ -247,6 +247,18 @@
     (is (= [:todo-a] (mapv :id (:to-do review))))
     (is (= [:done-b] (mapv :id (:unsynthesized-dones review))))))
 
+(deftest topology-projects-semantic-edges-in-capture-order
+  (let [graph (example-graph)
+        view (progress/topology graph)
+        by-id (into {} (map (juxt :id identity)) (:nodes view))]
+    (is (= [:root :principle] (:roots view)))
+    (is (= (:order graph) (mapv :id (:nodes view))))
+    (is (= [:question-a :question-b :done-b]
+           (:spawn-children (by-id :root))))
+    (is (= [:learned] (:resolved-by (by-id :question-a))))
+    (is (= [:done-b]
+           (mapv :id (get-in view [:frontier :unsynthesized-dones]))))))
+
 (deftest updates-preserve-existing-data
   (let [graph (-> (progress/empty-graph)
                   (add :q :to-know "Question?" [] 0)

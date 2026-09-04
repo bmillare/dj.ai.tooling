@@ -300,6 +300,26 @@
    :standing-context (standing-context graph {:focus focus})
    :frontier (frontier graph {:scope focus})})
 
+(defn topology
+  "Returns a compact, capture-ordered projection for renderers and agents.
+  Unlike the storage graph, every node carries its direct outgoing spawn and
+  incoming resolution edges, so consumers need not understand reverse indexes."
+  [graph]
+  {:roots (into []
+                (comp (map #(node graph %))
+                      (filter #(empty? (:spawned-by %)))
+                      (map :id))
+                (:order graph))
+   :nodes (mapv (fn [node-id]
+                  (let [value (node graph node-id)]
+                    (assoc value
+                           :spawn-children
+                           (mapv :id (children graph node-id))
+                           :resolved-by
+                           (mapv :id (resolved-by graph node-id)))))
+                (:order graph))
+   :frontier (frontier graph)})
+
 (defn candidates
   "Returns selectable open To Knows and To Dos in capture order."
   ([graph] (candidates graph {}))

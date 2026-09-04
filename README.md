@@ -283,4 +283,11 @@ node-local four-kind capture, explicit joins and resolution links, artifact
 references, standing Knows, agenda-only workflow controls, and one-command To
 Do completion with an optional note. Unsynthesized Dones appear in a small
 inbox; knowledge captured anywhere in the resolved To Do's subtree counts as
-synthesis. Restarting the process clears the graph.
+synthesis. The topology reads downward with visible depth guides, and a
+successful node-local capture clears its draft.
+
+Agents and alternate renderers can read `GET /api/graph` as EDN. It projects
+capture-ordered nodes with direct `:spawn-children` and `:resolved-by` edges,
+plus roots and the derived frontier. `GET /api/raw` exposes the storage value
+for debugging and comparison; consumers should prefer the semantic projection.
+Restarting the process clears the graph.

@@ -94,7 +94,7 @@
         done-note (signal-name "doneNote" node-id)
         nodes (remove #(= node-id (:id %)) (ordered-nodes graph))]
     [:article.node-card {:data-kind (name (:kind node))
-                         :style (str "grid-column:" (inc depth))
+                         :style (str "--depth:" depth)
                          :data-signals__ifmissing
                          (str "{" draft ": '', " also-from ": '', "
                               resolves ": '', " artifact ": '', " standing
@@ -126,8 +126,8 @@
       [:div.kind-actions
        (for [kind [:done :know :to-know :to-do]]
          [:button {:type "button" :data-kind (name kind)
-                   :data-on:click (str "@post('/spawn?parent=" node-id
-                                       "&kind=" (name kind) "')")}
+                   :data-on:click (str "await @post('/spawn?parent=" node-id
+                                       "&kind=" (name kind) "'); $" draft " = ''")}
           (get kind-labels kind)])]
       (when (seq nodes)
         [:details.join
@@ -231,7 +231,9 @@
   .hint { font-size: .8rem; margin: 1rem 0 0; }
   .kind-actions { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .8rem; } .kind-actions button[data-kind=know] { border-color: #5a9c70; } .kind-actions button[data-kind=done] { border-color: #5287aa; }
   .graph, .inbox { margin-top: 2.5rem; } .section-heading { margin-bottom: 1rem; color: #a8b4aa; } .section-heading h2 { color: #e9eee9; }
-  .node-list { display: grid; grid-template-columns: repeat(5, minmax(16rem, 1fr)); gap: 1rem 2.5rem; overflow-x: auto; align-items: start; padding: .5rem; } .node-card { position: relative; background: #171c18; border: 1px solid #2c352e; border-left: .3rem solid #778079; border-radius: .75rem; padding: 1rem; min-width: 16rem; }
+  .node-list { display: grid; gap: 1rem; align-items: start; padding: .5rem; } .node-card { position: relative; width: min(48rem, calc(100% - var(--depth) * 2rem)); margin-left: calc(var(--depth) * 2rem); background: #171c18; border: 1px solid #2c352e; border-left: .3rem solid #778079; border-radius: .75rem; padding: 1rem; }
+  .node-card[style*=\"--depth:0\"] { width: min(48rem, 100%); }
+  .node-card:not([style*=\"--depth:0\"]):before { content: ''; position: absolute; left: -2.3rem; top: -1.05rem; width: 2rem; height: 2rem; border-left: 2px solid #526259; border-bottom: 2px solid #526259; border-radius: 0 0 0 .45rem; }
   .node-card[data-kind=know] { border-left-color: #8fdda9; } .node-card[data-kind=done] { border-left-color: #6eafdf; } .node-card[data-kind=to-know] { border-left-color: #dbb167; } .node-card[data-kind=to-do] { border-left-color: #d77c7c; }
   .kind { font-size: .75rem; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; } .status { color: #a8b4aa; font-size: .75rem; }
   .status[data-status=blocked], .status[data-status=cancelled] { color: #e6a1a1; } .body { font-size: 1.05rem; margin: .8rem 0 .45rem; white-space: pre-wrap; }
@@ -241,13 +243,13 @@
   .spawn-line:before, .resolve-line:before { content: ''; position: absolute; left: 0; top: .55em; width: .7rem; border-top: 2px solid #8fdda9; } .resolve-line:before { border-top-style: dashed; border-color: #6eafdf; } .spawn-line span, .resolve-line span { color: #718078; margin-right: .35rem; }
   .pin-line, .synthesis-badge { color: #8fdda9; font-size: .72rem; margin: .4rem 0; } .synthesis-badge { color: #dbb167; }
   .inspector { color: #718078; font-size: .72rem; margin: .5rem 0; } .inspector summary, .join summary { cursor: pointer; }
-  .local-editor { border-top: 1px solid #2c352e; padding-top: .75rem; margin-top: .75rem; } .local-editor textarea { background: #f7faf7; }
+  .local-editor { border-top: 1px solid #2c352e; padding-top: .75rem; margin-top: .75rem; } .local-editor textarea { background: #f7faf7; min-height: 6rem; }
   .join { margin-top: .65rem; color: #a8b4aa; font-size: .75rem; } .join .field { margin-top: .5rem; }
   .complete-editor { display: grid; grid-template-columns: 1fr auto; gap: .45rem; margin-top: .7rem; } .complete-editor input { min-width: 0; }
   .inbox-item { display: flex; justify-content: space-between; gap: 1rem; align-items: center; padding: .8rem; border: 1px solid #4b4029; background: #211d15; border-radius: .65rem; margin-bottom: .5rem; }
   .status-actions { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .8rem; } .status-actions button { font-size: .72rem; padding: .35rem .5rem; }
   .empty-state { border: 1px dashed #465048; border-radius: .75rem; padding: 3rem 1rem; text-align: center; color: #839087; }
-  @media (max-width: 700px) { main { padding-top: 2rem; } .frontier, .form-grid { grid-template-columns: 1fr; } .body-field { grid-column: auto; } .form-heading { align-items: flex-end; } .node-list { grid-template-columns: minmax(16rem, 1fr); } .node-card { grid-column: 1 !important; } }
+  @media (max-width: 700px) { main { padding-top: 2rem; } .frontier, .form-grid { grid-template-columns: 1fr; } .body-field { grid-column: auto; } .form-heading { align-items: flex-end; } .node-card { width: calc(100% - var(--depth) * .65rem); margin-left: calc(var(--depth) * .65rem); } .node-card:not([style*=\"--depth:0\"]):before { left: -.95rem; width: .7rem; } }
   ")
 
 (defn page []
@@ -335,6 +337,12 @@
     [:get "/"] (response/html-response (page))
     [:get "/updates"]
     (subscribed/subscription-response request subscriptions #'render-main!)
+    [:get "/api/graph"]
+    (response/response (pr-str (progress/topology (:graph @state)))
+                       "application/edn; charset=utf-8")
+    [:get "/api/raw"]
+    (response/response (pr-str (:graph @state))
+                       "application/edn; charset=utf-8")
     [:post "/add-root"] (add-root! request)
     [:post "/spawn"] (spawn-node! request)
     [:post "/complete"] (complete! request)
