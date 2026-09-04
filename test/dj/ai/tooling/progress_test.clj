@@ -134,6 +134,53 @@
                 :nothing-learned? true :created-at #inst "2026-09-04"})]
     (is (empty? (progress/unsynthesized-dones graph)))))
 
+(deftest completion-is-kind-aware-and-atomic
+  (let [graph (-> (progress/empty-graph)
+                  (add :todo :to-do "Run it" [] 0)
+                  (progress/complete :todo {:id :done :body ""
+                                            :created-at #inst "2026-09-04T00:01:00Z"}))]
+    (is (= :closed (:status (progress/node graph :todo))))
+    (is (= "Completed." (:body (progress/node graph :done))))
+    (is (= #{:todo} (:spawned-by (progress/node graph :done))))
+    (is (= #{:todo} (:resolves (progress/node graph :done))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"open or blocked"
+                          (progress/complete graph :todo
+                                             {:id :again :created-at #inst "2026-09-04"})))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Only a To Do"
+                          (progress/complete
+                           (add (progress/empty-graph) :know :know "Fact" [] 0)
+                           :know {:id :done :created-at #inst "2026-09-04"})))))
+
+(deftest kind-aware-capabilities-guide-consumers
+  (let [todo {:kind :to-do :status :open}
+        know {:kind :know :status :open}]
+    (is (progress/agenda? todo))
+    (is (progress/assertion? know))
+    (is (progress/actionable? todo))
+    (is (progress/status-transition? todo :blocked))
+    (is (not (progress/status-transition? know :cancelled)))))
+
+(deftest resolved-todo-subtree-knowledge-synthesizes-completion
+  (let [graph (-> (progress/empty-graph)
+                  (add :todo :to-do "Investigate" [] 0)
+                  (add :know :know "Finding captured during work" [:todo] 1)
+                  (progress/complete :todo {:id :done :body ""
+                                            :created-at #inst "2026-09-04T00:02:00Z"}))]
+    (is (empty? (progress/unsynthesized-dones graph)))
+    (is (not (progress/synthesis-pending? graph :done)))))
+
+(deftest cancelled-subtree-knowledge-does-not-synthesize-completion
+  (let [graph (-> (progress/empty-graph)
+                  (add :todo :to-do "Investigate" [] 0)
+                  (add :know :know "Retracted finding" [:todo] 1)
+                  (progress/set-status :know :cancelled)
+                  (progress/complete :todo {:id :done :body "Finished"
+                                            :created-at #inst "2026-09-04T00:02:00Z"}))]
+    (is (= [:done] (mapv :id (progress/unsynthesized-dones graph))))
+    (is (progress/synthesis-pending? graph :done))
+    (is (empty? (progress/unsynthesized-dones
+                 (progress/mark-nothing-learned graph :done))))))
+
 (deftest status-is-current-state-and-resolution-is-provenance
   (let [resolved (-> (progress/empty-graph)
                      (add :q :to-know "Question?" [] 0)

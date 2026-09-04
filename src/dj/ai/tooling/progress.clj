@@ -10,6 +10,29 @@
 (def node-kinds #{:done :know :to-know :to-do})
 (def statuses #{:open :blocked :closed :cancelled})
 
+(defn agenda?
+  "True for question and activity nodes, whose lifecycle is workflow state."
+  [value]
+  (contains? #{:to-know :to-do} (:kind value)))
+
+(defn assertion?
+  "True for Know and Done nodes, which record understanding or observation."
+  [value]
+  (contains? #{:know :done} (:kind value)))
+
+(defn actionable?
+  "True when an agenda node is currently available to work."
+  [value]
+  (and (agenda? value) (= :open (:status value))))
+
+(defn status-transition?
+  "Whether the kind-aware UI should offer a workflow status transition.
+  Generic set-status remains available for backwards-compatible graph data."
+  [value status]
+  (and (agenda? value)
+       (statuses status)
+       (not= status (:status value))))
+
 (defn empty-graph []
   {:nodes {} :order [] :spawn-children {} :resolved-by {}})
 
@@ -96,6 +119,24 @@
 (defn spawn [graph parent-ids value]
   (add-node graph (assoc value :spawned-by (set parent-ids))))
 
+(defn complete
+  "Records completion of a To Do by atomically spawning a Done from it and
+  resolving it. An absent or blank body becomes a deliberately thin
+  observation; callers still supply the Done's id and created-at."
+  [graph to-do-id done]
+  (let [target (require-node graph to-do-id :completion-target)]
+    (when-not (= :to-do (:kind target))
+      (fail "Only a To Do can be completed with a Done."
+            {:node-id to-do-id :kind (:kind target)}))
+    (when-not (#{:open :blocked} (:status target))
+      (fail "Only an open or blocked To Do can be completed."
+            {:node-id to-do-id :status (:status target)}))
+    (add-node graph (-> done
+                        (assoc :kind :done
+                               :spawned-by #{to-do-id}
+                               :resolves #{to-do-id})
+                        (update :body #(if (str/blank? %) "Completed." %))))))
+
 (defn resolve
   "Adds historical outcome edges to an existing resolver and closes their
   targets. Cancelled targets must first be explicitly reopened. A later status
@@ -128,6 +169,15 @@
 (defn attach-artifact [graph node-id artifact]
   (require-node graph node-id :artifact-target)
   (update-in graph [:nodes node-id :artifacts] (fnil conj []) artifact))
+
+(defn mark-nothing-learned
+  "Marks a Done as intentionally requiring no synthesis."
+  [graph node-id]
+  (let [value (require-node graph node-id :synthesis-candidate)]
+    (when-not (= :done (:kind value))
+      (fail "Only a Done can be marked as yielding nothing learned."
+            {:node-id node-id :kind (:kind value)}))
+    (assoc-in graph [:nodes node-id :nothing-learned?] true)))
 
 (defn children
   "Returns direct spawn children in capture order. O(out-degree)."
@@ -177,24 +227,43 @@
   (or (nil? scope-ids) (contains? scope-ids candidate-id)))
 
 (defn- unsynthesized-dones-in [graph scope-ids]
-  (let [synthesized (into #{}
+  (let [active-know? #(and (= :know (:kind %))
+                            (not= :cancelled (:status %)))
+        active-know-ids (into []
+                              (filter #(active-know? (node graph %)))
+                              (:order graph))
+        synthesized-by-child (into #{}
                           (comp (map #(node graph %))
-                                (filter #(and (= :know (:kind %))
-                                              (not= :cancelled (:status %))))
+                                (filter active-know?)
                                 (mapcat :spawned-by))
-                          (:order graph))]
+                          (:order graph))
+        has-know-descendant (loop [queue (into clojure.lang.PersistentQueue/EMPTY
+                                               active-know-ids)
+                                   seen (set active-know-ids)
+                                   result #{}]
+                              (if-let [node-id (peek queue)]
+                                (let [parents (:spawned-by (node graph node-id))
+                                      unseen (remove seen parents)]
+                                  (recur (into (pop queue) unseen)
+                                         (into seen unseen)
+                                         (into result parents)))
+                                result))
+        synthesized? (fn [done]
+                       (or (synthesized-by-child (:id done))
+                           (some has-know-descendant (:resolves done))))]
     (into []
           (comp (map #(node graph %))
                 (filter #(and (= :done (:kind %))
                               (not= :cancelled (:status %))
                               (in-scope? scope-ids (:id %))
                               (not (:nothing-learned? %))
-                              (not (synthesized (:id %))))))
+                              (not (synthesized? %)))))
           (:order graph))))
 
 (defn unsynthesized-dones
-  "Returns non-cancelled Dones without a spawned Know, except explicit
-  nothing-learned Dones."
+  "Returns non-cancelled Dones pending synthesis. A Done is synthesized by a
+  spawned Know, explicit nothing-learned mark, or a Know already captured in
+  the subtree of a To Do that the Done resolves."
   ([graph] (unsynthesized-dones graph {}))
   ([graph {:keys [scope]}]
    (unsynthesized-dones-in graph (scope-node-ids graph scope))))
@@ -243,6 +312,14 @@
                                    (and include-blocked? (= :blocked (:status %))))
                                (in-scope? scope-ids (:id %)))))
            (:order graph)))))
+
+(defn synthesis-pending?
+  "True when a Done currently belongs in the synthesis inbox."
+  [graph node-id]
+  (let [value (require-node graph node-id :synthesis-candidate)]
+    (and (= :done (:kind value))
+         (boolean (some #(= node-id (:id %))
+                        (unsynthesized-dones graph))))))
 
 (defn review-session
   "Groups explicitly selected node ids into Watson's four lenses."

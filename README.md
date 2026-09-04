@@ -35,6 +35,14 @@ history.
 ;; => {:to-knows [...], :to-dos [...], :unsynthesized-dones [...]}
 ```
 
+Agenda nodes (`:to-know`, `:to-do`) have workflow state; assertion nodes
+(`:know`, `:done`) record understanding and observations. The kind-aware
+`agenda?`, `assertion?`, `actionable?`, and `status-transition?` predicates let
+consumers present those roles without narrowing the generic graph operations.
+`complete` is the common compound gesture: it creates a Done that spawns from
+and resolves an open To Do atomically. Its body may be blank, in which case a
+minimal completion observation is supplied.
+
 Callers provide ids and timestamps, so graph updates and queries are
 deterministic. The namespace deliberately does not choose storage, clocks,
 ranking policy, Markdown rendering, or a UI contract yet.
@@ -270,7 +278,9 @@ nix develop --command clojure -M:graph-builder
 Open `http://localhost:9090` (or set `PORT`). The UI uses dj.web's
 current-state Datastar shape: commands commit graph state and return `204`, one
 long-lived subscription re-renders the full `<main>`, and browser signals hold
-only form drafts. It supports roots, one-parent spawns, resolution and pinning
-on creation, and status transitions. The core itself continues to support
-multi-parent joins; the narrower editor is an intentional first evaluation
-surface. Restarting the process clears the graph.
+only form drafts. The topology-first surface supports separate root creation,
+node-local four-kind capture, explicit joins and resolution links, artifact
+references, standing Knows, agenda-only workflow controls, and one-command To
+Do completion with an optional note. Unsynthesized Dones appear in a small
+inbox; knowledge captured anywhere in the resolved To Do's subtree counts as
+synthesis. Restarting the process clears the graph.
