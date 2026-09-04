@@ -45,6 +45,12 @@ resolved node therefore preserves those edges. Cancellation is an explicit
 retraction: cancelled nodes are omitted from synthesis and standing-context
 views, and must be reopened before they can be resolved.
 
+The graph value maintains spawn-child and reverse-resolution indexes alongside
+its canonical node data. Build it through the namespace's update primitives so
+those indexes remain consistent. `children` is O(out-degree), `resolved-by` is
+O(in-degree), and scoped aggregate queries are O(V+E): they walk the selected
+scope once and retain capture order while filtering nodes.
+
 ## Motivation
 
 A conventional tool call is only one way for a language model to interact with

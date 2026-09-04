@@ -77,6 +77,43 @@
            (set (map :id (progress/ancestors graph :join)))))
     (is (= [:left :right] (mapv :id (progress/children graph :root))))))
 
+(deftest maintains-direct-edge-indexes
+  (let [graph (-> (progress/empty-graph)
+                  (add :root :know "Root" [] 0)
+                  (add :left :to-know "Left?" [:root] 1)
+                  (add :right :to-know "Right?" [:root] 2)
+                  (add :answer-a :know "First answer." [] 3)
+                  (add :answer-b :know "Second answer." [] 4)
+                  (progress/resolve :answer-a [:left])
+                  (progress/resolve :answer-b [:left])
+                  (progress/resolve :answer-a [:left]))]
+    (is (= {:root [:left :right]} (:spawn-children graph)))
+    (is (= [:left :right] (mapv :id (progress/children graph :root))))
+    (is (= [:answer-a :answer-b]
+           (mapv :id (progress/resolved-by graph :left))))
+    (is (= [:answer-a :answer-b] (get-in graph [:resolved-by :left])))))
+
+(deftest node-creation-populates-reverse-resolution-index
+  (let [graph (-> (progress/empty-graph)
+                  (add :q :to-know "Question?" [] 0)
+                  (progress/add-node {:id :answer :kind :know :body "Answer."
+                                      :resolves [:q]
+                                      :created-at #inst "2026-09-04T00:01:00Z"}))]
+    (is (= [:answer] (mapv :id (progress/resolved-by graph :q))))))
+
+(deftest scoped-queries-follow-descendants-through-joins
+  (let [graph (-> (progress/empty-graph)
+                  (add :root-a :know "Root A" [] 0)
+                  (add :root-b :know "Root B" [] 1)
+                  (add :a :to-know "A?" [:root-a] 2)
+                  (add :join :to-do "Joined work" [:a :root-b] 3)
+                  (add :outside :to-do "Outside" [:root-b] 4))]
+    (is (= [:a :join]
+           (mapv :id (progress/candidates graph {:scope :root-a}))))
+    (let [frontier (progress/frontier graph {:scope :root-a})]
+      (is (= [:a] (mapv :id (:to-knows frontier))))
+      (is (= [:join] (mapv :id (:to-dos frontier)))))))
+
 (deftest derives-frontier-context-and-candidates
   (let [graph (example-graph)
         frontier (progress/frontier graph {:scope :root})]

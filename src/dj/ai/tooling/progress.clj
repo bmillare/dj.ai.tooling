@@ -10,7 +10,8 @@
 (def node-kinds #{:done :know :to-know :to-do})
 (def statuses #{:open :blocked :closed :cancelled})
 
-(defn empty-graph [] {:nodes {} :order []})
+(defn empty-graph []
+  {:nodes {} :order [] :spawn-children {} :resolved-by {}})
 
 (defn node [graph node-id]
   (get-in graph [:nodes node-id]))
@@ -80,10 +81,17 @@
   [graph value]
   (let [value (normalize-node value)]
     (validate-new-node graph value)
-    (-> (reduce #(assoc-in %1 [:nodes %2 :status] :closed)
-                graph (:resolves value))
-        (assoc-in [:nodes (:id value)] value)
-        (update :order conj (:id value)))))
+    (let [node-id (:id value)]
+      (-> (reduce #(-> %1
+                       (assoc-in [:nodes %2 :status] :closed)
+                       (update-in [:resolved-by %2] (fnil conj []) node-id))
+                  graph (:resolves value))
+          (assoc-in [:nodes node-id] value)
+          (update :order conj node-id)
+          (#(reduce (fn [g parent-id]
+                      (update-in g [:spawn-children parent-id]
+                                 (fnil conj []) node-id))
+                    % (:spawned-by value)))))))
 
 (defn spawn [graph parent-ids value]
   (add-node graph (assoc value :spawned-by (set parent-ids))))
@@ -100,6 +108,12 @@
     (reduce (fn [g target-id]
               (-> g
                   (update-in [:nodes resolver-id :resolves] (fnil conj #{}) target-id)
+                  (update-in [:resolved-by target-id]
+                             (fnil (fn [ids]
+                                     (if (some #{resolver-id} ids)
+                                       ids
+                                       (conj ids resolver-id)))
+                                   []))
                   (assoc-in [:nodes target-id :status] :closed)))
             graph targets)))
 
@@ -116,82 +130,100 @@
   (update-in graph [:nodes node-id :artifacts] (fnil conj []) artifact))
 
 (defn children
-  ([graph node-id] (children graph node-id {:via :spawn}))
-  ([graph node-id {:keys [via] :or {via :spawn}}]
-   (require-node graph node-id :parent)
-   (when-not (= :spawn via)
-     (fail "Only spawn ancestry is supported." {:via via}))
-   (into [] (comp (map #(node graph %))
-                  (filter #(contains? (:spawned-by %) node-id)))
-         (:order graph))))
+  "Returns direct spawn children in capture order. O(out-degree)."
+  [graph node-id]
+  (require-node graph node-id :parent)
+  (mapv #(require-node graph % :spawn-child)
+        (get-in graph [:spawn-children node-id] [])))
+
+(defn resolved-by
+  "Returns nodes that resolved node-id, in resolution-recording order.
+  O(in-degree)."
+  [graph node-id]
+  (require-node graph node-id :resolution-target)
+  (mapv #(require-node graph % :resolver)
+        (get-in graph [:resolved-by node-id] [])))
 
 (defn ancestors
   "Returns all spawn ancestors, nearest first, without duplicates."
-  ([graph node-id] (ancestors graph node-id {:via :spawn}))
-  ([graph node-id {:keys [via] :or {via :spawn}}]
-   (when-not (= :spawn via)
-     (fail "Only spawn ancestry is supported." {:via via}))
-   (require-node graph node-id :descendant)
-   (loop [queue (into clojure.lang.PersistentQueue/EMPTY
-                      (:spawned-by (node graph node-id)))
-          seen #{}
-          result []]
-     (if-let [ancestor-id (peek queue)]
-       (if (seen ancestor-id)
-         (recur (pop queue) seen result)
-         (let [ancestor (require-node graph ancestor-id :spawn-ancestor)]
-           (recur (into (pop queue) (:spawned-by ancestor))
-                  (conj seen ancestor-id) (conj result ancestor))))
-       result))))
+  [graph node-id]
+  (require-node graph node-id :descendant)
+  (loop [queue (into clojure.lang.PersistentQueue/EMPTY
+                     (:spawned-by (node graph node-id)))
+         seen #{}
+         result []]
+    (if-let [ancestor-id (peek queue)]
+      (if (seen ancestor-id)
+        (recur (pop queue) seen result)
+        (let [ancestor (require-node graph ancestor-id :spawn-ancestor)]
+          (recur (into (pop queue) (:spawned-by ancestor))
+                 (conj seen ancestor-id) (conj result ancestor))))
+      result)))
 
-(defn- in-scope? [graph scope-id candidate-id]
-  (or (nil? scope-id) (= scope-id candidate-id)
-      (some #(= scope-id (:id %)) (ancestors graph candidate-id))))
+(defn- scope-node-ids [graph scope-id]
+  (when scope-id
+    (require-node graph scope-id :scope)
+    (loop [queue (conj clojure.lang.PersistentQueue/EMPTY scope-id)
+           seen #{}]
+      (if-let [node-id (peek queue)]
+        (if (seen node-id)
+          (recur (pop queue) seen)
+          (recur (into (pop queue)
+                       (get-in graph [:spawn-children node-id] []))
+                 (conj seen node-id)))
+        seen))))
+
+(defn- in-scope? [scope-ids candidate-id]
+  (or (nil? scope-ids) (contains? scope-ids candidate-id)))
+
+(defn- unsynthesized-dones-in [graph scope-ids]
+  (let [synthesized (into #{}
+                          (comp (map #(node graph %))
+                                (filter #(and (= :know (:kind %))
+                                              (not= :cancelled (:status %))))
+                                (mapcat :spawned-by))
+                          (:order graph))]
+    (into []
+          (comp (map #(node graph %))
+                (filter #(and (= :done (:kind %))
+                              (not= :cancelled (:status %))
+                              (in-scope? scope-ids (:id %))
+                              (not (:nothing-learned? %))
+                              (not (synthesized (:id %))))))
+          (:order graph))))
 
 (defn unsynthesized-dones
   "Returns non-cancelled Dones without a spawned Know, except explicit
   nothing-learned Dones."
   ([graph] (unsynthesized-dones graph {}))
   ([graph {:keys [scope]}]
-   (let [synthesized (into #{}
-                           (comp (map #(node graph %))
-                                 (filter #(and (= :know (:kind %))
-                                               (not= :cancelled (:status %))))
-                                 (mapcat :spawned-by))
-                           (:order graph))]
-     (into []
-           (comp (map #(node graph %))
-                 (filter #(and (= :done (:kind %))
-                               (not= :cancelled (:status %))
-                               (in-scope? graph scope (:id %))
-                               (not (:nothing-learned? %))
-                               (not (synthesized (:id %))))))
-           (:order graph)))))
+   (unsynthesized-dones-in graph (scope-node-ids graph scope))))
 
 (defn frontier
   "Returns the understanding agenda, activity agenda, and synthesis inbox."
   ([graph] (frontier graph {}))
   ([graph {:keys [scope]}]
-   (when scope (require-node graph scope :scope))
-   (let [visible (fn [kind]
+   (let [scope-ids (scope-node-ids graph scope)
+         visible (fn [kind]
                    (into []
                          (comp (map #(node graph %))
                                (filter #(and (= kind (:kind %))
                                              (#{:open :blocked} (:status %))
-                                             (in-scope? graph scope (:id %)))))
+                                             (in-scope? scope-ids (:id %)))))
                          (:order graph)))]
      {:to-knows (visible :to-know)
       :to-dos (visible :to-do)
-      :unsynthesized-dones (unsynthesized-dones graph {:scope scope})})))
+      :unsynthesized-dones (unsynthesized-dones-in graph scope-ids)})))
 
 (defn standing-context [graph {:keys [focus]}]
   (require-node graph focus :focus)
-  (into []
-        (comp (map #(node graph %))
-              (filter #(and (= :know (:kind %)) (:pinned-under %)
-                            (not= :cancelled (:status %))
-                            (in-scope? graph (:pinned-under %) focus))))
-        (:order graph)))
+  (let [lineage (conj (set (map :id (ancestors graph focus))) focus)]
+    (into []
+          (comp (map #(node graph %))
+                (filter #(and (= :know (:kind %)) (:pinned-under %)
+                              (not= :cancelled (:status %))
+                              (contains? lineage (:pinned-under %)))))
+          (:order graph))))
 
 (defn focus-context [graph focus]
   {:focus (require-node graph focus :focus)
@@ -203,14 +235,14 @@
   "Returns selectable open To Knows and To Dos in capture order."
   ([graph] (candidates graph {}))
   ([graph {:keys [scope include-blocked?]}]
-   (when scope (require-node graph scope :scope))
-   (into []
-         (comp (map #(node graph %))
-               (filter #(and (#{:to-know :to-do} (:kind %))
-                             (or (= :open (:status %))
-                                 (and include-blocked? (= :blocked (:status %))))
-                             (in-scope? graph scope (:id %)))))
-         (:order graph))))
+   (let [scope-ids (scope-node-ids graph scope)]
+     (into []
+           (comp (map #(node graph %))
+                 (filter #(and (#{:to-know :to-do} (:kind %))
+                               (or (= :open (:status %))
+                                   (and include-blocked? (= :blocked (:status %))))
+                               (in-scope? scope-ids (:id %)))))
+           (:order graph)))))
 
 (defn review-session
   "Groups explicitly selected node ids into Watson's four lenses."
