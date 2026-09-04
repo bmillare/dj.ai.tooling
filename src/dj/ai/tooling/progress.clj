@@ -38,7 +38,11 @@
     (when-not (valid-resolution? resolver target)
       (fail "Resolution must be Done -> To Do or Know -> To Know."
             {:resolver-id (:id resolver) :resolver-kind (:kind resolver)
-             :target-id target-id :target-kind (:kind target)}))))
+             :target-id target-id :target-kind (:kind target)}))
+    (when (= :cancelled (:status target))
+      (fail "Cancelled nodes must be reopened before they can be resolved."
+            {:resolver-id (:id resolver) :target-id target-id
+             :target-status (:status target)}))))
 
 (defn- validate-new-node [graph value]
   (let [{:keys [id kind body status spawned-by resolves pinned-under
@@ -85,7 +89,9 @@
   (add-node graph (assoc value :spawned-by (set parent-ids))))
 
 (defn resolve
-  "Adds outcome edges to an existing resolver and closes their targets."
+  "Adds historical outcome edges to an existing resolver and closes their
+  targets. Cancelled targets must first be explicitly reopened. A later status
+  change does not remove the resolution provenance."
   [graph resolver-id target-ids]
   (let [resolver (require-node graph resolver-id :resolver)
         targets (set target-ids)]
@@ -98,6 +104,8 @@
             graph targets)))
 
 (defn set-status [graph node-id status]
+  ;; Status is current workflow state. In particular, reopening a resolved node
+  ;; intentionally preserves the resolver's historical :resolves edge.
   (require-node graph node-id :status-target)
   (when-not (statuses status)
     (fail "Progress node has an unknown :status." {:node-id node-id :status status}))
@@ -141,17 +149,20 @@
       (some #(= scope-id (:id %)) (ancestors graph candidate-id))))
 
 (defn unsynthesized-dones
-  "Returns Dones without a spawned Know, except explicit nothing-learned Dones."
+  "Returns non-cancelled Dones without a spawned Know, except explicit
+  nothing-learned Dones."
   ([graph] (unsynthesized-dones graph {}))
   ([graph {:keys [scope]}]
    (let [synthesized (into #{}
                            (comp (map #(node graph %))
-                                 (filter #(= :know (:kind %)))
+                                 (filter #(and (= :know (:kind %))
+                                               (not= :cancelled (:status %))))
                                  (mapcat :spawned-by))
                            (:order graph))]
      (into []
            (comp (map #(node graph %))
                  (filter #(and (= :done (:kind %))
+                               (not= :cancelled (:status %))
                                (in-scope? graph scope (:id %))
                                (not (:nothing-learned? %))
                                (not (synthesized (:id %))))))
@@ -178,6 +189,7 @@
   (into []
         (comp (map #(node graph %))
               (filter #(and (= :know (:kind %)) (:pinned-under %)
+                            (not= :cancelled (:status %))
                             (in-scope? graph (:pinned-under %) focus))))
         (:order graph)))
 

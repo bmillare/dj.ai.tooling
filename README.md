@@ -39,6 +39,12 @@ Callers provide ids and timestamps, so graph updates and queries are
 deterministic. The namespace deliberately does not choose storage, clocks,
 ranking policy, Markdown rendering, or a UI contract yet.
 
+Node status is authoritative current workflow state, while resolution edges
+retain the provenance of outcomes that previously closed a node. Reopening a
+resolved node therefore preserves those edges. Cancellation is an explicit
+retraction: cancelled nodes are omitted from synthesis and standing-context
+views, and must be reopened before they can be resolved.
+
 ## Motivation
 
 A conventional tool call is only one way for a language model to interact with

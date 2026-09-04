@@ -45,6 +45,28 @@
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Done -> To Do"
                           (progress/resolve graph :d [:q])))))
 
+(deftest rejects-invalid-node-fields
+  (let [graph (-> (progress/empty-graph)
+                  (add :root :know "Root" [] 0))
+        at #inst "2026-09-04"]
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"already exists"
+                          (progress/add-node graph
+                                             {:id :root :kind :know :body "Again"
+                                              :created-at at})))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"non-blank"
+                          (progress/add-node graph
+                                             {:id :blank :kind :know :body "  "
+                                              :created-at at})))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Only Know"
+                          (progress/add-node graph
+                                             {:id :task :kind :to-do :body "Work"
+                                              :pinned-under :root :created-at at})))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"only on Done"
+                          (progress/add-node graph
+                                             {:id :fact :kind :know :body "Fact"
+                                              :nothing-learned? true
+                                              :created-at at})))))
+
 (deftest traverses-a-joining-graph
   (let [graph (-> (progress/empty-graph)
                   (add :root :know "Root" [] 0)
@@ -74,6 +96,60 @@
                {:id :done :kind :done :body "Experiment changed nothing."
                 :nothing-learned? true :created-at #inst "2026-09-04"})]
     (is (empty? (progress/unsynthesized-dones graph)))))
+
+(deftest status-is-current-state-and-resolution-is-provenance
+  (let [resolved (-> (progress/empty-graph)
+                     (add :q :to-know "Question?" [] 0)
+                     (add :k :know "Initial answer." [:q] 1)
+                     (progress/resolve :k [:q]))
+        reopened (progress/set-status resolved :q :open)]
+    (is (= :open (:status (progress/node reopened :q))))
+    (is (= #{:q} (:resolves (progress/node reopened :k))))
+    (is (= [:q] (mapv :id (progress/candidates reopened))))))
+
+(deftest cancelled-targets-must-be-reopened-before-resolution
+  (let [graph (-> (progress/empty-graph)
+                  (add :q :to-know "Question?" [] 0)
+                  (progress/set-status :q :cancelled)
+                  (add :k :know "Answer." [] 1))]
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"must be reopened"
+                          (progress/resolve graph :k [:q])))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"must be reopened"
+                          (progress/add-node graph
+                                             {:id :other :kind :know
+                                              :body "Another answer."
+                                              :resolves #{:q}
+                                              :created-at #inst "2026-09-04T00:02:00Z"})))
+    (let [resolved (-> graph
+                       (progress/set-status :q :open)
+                       (progress/resolve :k [:q]))]
+      (is (= :closed (:status (progress/node resolved :q)))))))
+
+(deftest cancelled-nodes-are-retracted-from-derived-views
+  (let [graph (-> (progress/empty-graph)
+                  (add :root :know "Root" [] 0)
+                  (progress/add-node {:id :principle :kind :know :body "Context"
+                                      :pinned-under :root
+                                      :created-at #inst "2026-09-04T00:01:00Z"})
+                  (add :done :done "Result" [:root] 2))
+        closed (-> graph
+                   (progress/set-status :principle :closed)
+                   (progress/set-status :done :closed))
+        cancelled (-> closed
+                      (progress/set-status :principle :cancelled)
+                      (progress/set-status :done :cancelled))]
+    (is (= [:done] (mapv :id (progress/unsynthesized-dones closed))))
+    (is (= [:principle]
+           (mapv :id (progress/standing-context closed {:focus :done}))))
+    (is (empty? (progress/unsynthesized-dones cancelled)))
+    (is (empty? (progress/standing-context cancelled {:focus :done})))))
+
+(deftest cancelled-know-does-not-count-as-synthesis
+  (let [graph (-> (progress/empty-graph)
+                  (add :done :done "Result" [] 0)
+                  (add :know :know "Retracted synthesis" [:done] 1)
+                  (progress/set-status :know :cancelled))]
+    (is (= [:done] (mapv :id (progress/unsynthesized-dones graph))))))
 
 (deftest focus-and-session-return-structured-data
   (let [graph (example-graph)
