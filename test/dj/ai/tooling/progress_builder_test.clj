@@ -54,7 +54,7 @@
 (deftest topology-is-dense-with-root-and-node-local-editing
   (add-root "know" "Content remains prominent")
   (let [body (:body (builder/app {:request-method :get :uri "/"}))]
-    (is (str/includes? body "data-signals__ifmissing=\"{creatingRoot: false, showingModelView: false, showingChanges: false, changesCursor: &apos;&apos;, graphFilter: &apos;&apos;}\""))
+    (is (str/includes? body "data-signals__ifmissing=\"{creatingRoot: false, showingModelView: false, showingChanges: false, showingReviewed: false, changesCursor: &apos;&apos;, graphFilter: &apos;&apos;}\""))
     (is (str/includes? body "data-show=\"$creatingRoot\""))
     (is (str/includes? body "$editing_"))
     (is (str/includes? body "New node"))
@@ -325,14 +325,23 @@
     (is (= "Completed." (get-in graph [:nodes done-id :body])))
     (is (= #{todo-id} (get-in graph [:nodes done-id :resolves])))))
 
-(deftest synthesis-inbox-can-record-nothing-learned
+(deftest synthesis-inbox-review-mark-is-reversible
   (add-root "done" "A result arrived")
   (let [done-id (first (get-in @builder/state [:graph :order]))]
     (is (str/includes? (:body (builder/app {:request-method :get :uri "/"}))
                        "Results to review"))
     (is (= 204 (:status
-                (builder/app (post-request "/nothing-learned" {"node" done-id} "{}")))))
-    (is (true? (get-in @builder/state [:graph :nodes done-id :nothing-learned?])))))
+                (builder/app (post-request "/set-reviewed"
+                                           {"node" done-id "reviewed" "true"}
+                                           "{}")))))
+    (is (true? (get-in @builder/state [:graph :nodes done-id :reviewed?])))
+    (is (str/includes? (:body (builder/app {:request-method :get :uri "/"}))
+                       "Reviewed, no Know yet"))
+    (is (= 204 (:status
+                (builder/app (post-request "/set-reviewed"
+                                           {"node" done-id "reviewed" "false"}
+                                           "{}")))))
+    (is (false? (get-in @builder/state [:graph :nodes done-id :reviewed?])))))
 
 (deftest invalid-command-is-visible-and-does-not-change-graph
   (is (= 204 (:status

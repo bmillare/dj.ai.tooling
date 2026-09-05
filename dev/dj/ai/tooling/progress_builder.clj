@@ -186,6 +186,22 @@
     (subscribed/mark-dirty! subscriptions)
     (some #(when (= resolver-id (:id %)) %) (:nodes (topology)))))
 
+(defn review!
+  "Sets or clears the reversible read mark on a Done by id or alias; requires
+  `identify!` first. (review! \"D4\") marks it read and removes it from the
+  synthesis inbox; (review! \"D4\" false) returns it there. No claim about
+  what was learned is recorded either way."
+  ([id-or-alias] (review! id-or-alias true))
+  ([id-or-alias reviewed?]
+   (let [node-id (progress/resolve-id (:graph @state) id-or-alias)
+         author (repl-author!)]
+     (transact! #(-> %
+                     (update :graph progress/set-reviewed node-id reviewed?)
+                     (author-event author (if reviewed? :review :unreview)
+                                   {:node-ids [node-id]})))
+     (subscribed/mark-dirty! subscriptions)
+     (some (fn [n] (when (= node-id (:id n)) n)) (:nodes (topology))))))
+
 (defn attribute!
   "Backfills known provenance onto an existing node, e.g.
   (attribute! id {:actor :brent}). The attribution itself is a write, so
@@ -500,17 +516,40 @@
                                          "&status=" (name status) "')")}
             (get status-labels status)])])]]]))
 
-(defn- synthesis-inbox [graph]
-  (when-let [dones (seq (progress/unsynthesized-dones graph))]
-    [:section.inbox
-     [:div.section-heading [:h2 "Results to review"] [:span (count dones)]]
-     (for [done dones]
-       [:div.inbox-item
-        [:span (:body done)]
-        [:div
-         [:button {:type "button"
-                   :data-on:click (str "@post('/nothing-learned?node=" (:id done) "')")}
-          "Nothing learned"]]])]))
+(defn- set-reviewed-action [node-id reviewed?]
+  (str "@post('/set-reviewed?node=" node-id "&reviewed=" reviewed? "')"))
+
+(defn- synthesis-inbox
+  "Unreviewed unsynthesized Dones, plus a collapsed reviewed section so a
+  reviewed Done visibly moves instead of vanishing and the mark is one click
+  to undo (the K31/Q9 read-mark semantics: 'I looked', not 'nothing here')."
+  [graph]
+  (let [dones (progress/unsynthesized-dones graph)
+        reviewed (progress/reviewed-dones graph)]
+    (when (or (seq dones) (seq reviewed))
+      [:section.inbox
+       [:div.section-heading [:h2 "Results to review"] [:span (count dones)]]
+       (for [done dones]
+         [:div.inbox-item
+          [:span (:body done)]
+          [:div
+           [:button {:type "button"
+                     :data-on:click (set-reviewed-action (:id done) true)}
+            "Mark reviewed"]]])
+       (when (seq reviewed)
+         (list
+          [:button.reviewed-toggle
+           {:type "button"
+            :data-on:click "$showingReviewed = !$showingReviewed"}
+           (str "Reviewed, no Know yet: " (count reviewed))]
+          [:div {:data-show "$showingReviewed"}
+           (for [done reviewed]
+             [:div.inbox-item.reviewed
+              [:span (:body done)]
+              [:div
+               [:button {:type "button"
+                         :data-on:click (set-reviewed-action (:id done) false)}
+                "Mark unread"]]])]))])))
 
 (defn- frontier-group [alias-of filter-value label nodes]
   [:section.frontier-group
@@ -610,7 +649,7 @@
              :resolution-targets (into #{} (mapcat :resolves) (:nodes topology))
              :current-work-ids
              (set (map :id (:nodes (progress/current-work graph))))}]
-    [:main#app {:data-signals__ifmissing "{creatingRoot: false, showingModelView: false, showingChanges: false, changesCursor: '', graphFilter: ''}"}
+    [:main#app {:data-signals__ifmissing "{creatingRoot: false, showingModelView: false, showingChanges: false, showingReviewed: false, changesCursor: '', graphFilter: ''}"}
      [:section.hero
       [:p.eyebrow "dj.ai.tooling / dev"]
       [:h1 "Progress graph builder"]
@@ -743,6 +782,9 @@
   .complete-editor { display: grid; grid-template-columns: 1fr auto; gap: .45rem; margin-top: .7rem; } .complete-editor input { min-width: 0; }
   .resolve-existing { border-top: 1px solid #2b2d33; margin-top: .7rem; padding-top: .6rem; } .resolve-row { display: grid; grid-template-columns: 1fr auto; gap: .45rem; } .resolve-row select { min-width: 0; }
   .inbox-item { display: flex; justify-content: space-between; gap: 1rem; align-items: center; padding: .8rem; border: 1px solid #4b4029; background: #211d15; border-radius: .65rem; margin-bottom: .5rem; }
+  .inbox-item.reviewed { opacity: .55; border-color: #3a3d44; background: #1b1d22; }
+  .reviewed-toggle { margin: .35rem 0 .6rem; background: none; border: none; color: #a6a8ae; cursor: pointer; padding: 0; font-size: .85rem; }
+  .reviewed-toggle:hover { color: #e8e9eb; }
   .status-actions { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .8rem; } .status-actions button { font-size: .72rem; padding: .35rem .5rem; }
   .empty-state { border: 1px dashed #45484f; border-radius: .75rem; padding: 3rem 1rem; text-align: center; color: #84878e; }
   @media (max-width: 700px) { main { padding-top: 2rem; } .frontier, .form-grid { grid-template-columns: 1fr; } .body-field { grid-column: auto; } .form-heading { align-items: flex-end; } .rail { --rail-x: .25rem; width: .65rem; } }
@@ -824,10 +866,11 @@
                                    :author ui-author})
              "Done recorded.")))
 
-(defn- nothing-learned! [request]
-  (let [node-id (get-in request [:query-params "node"])]
-    (commit! #(progress/mark-nothing-learned % node-id)
-             "Marked nothing learned.")))
+(defn- set-reviewed! [request]
+  (let [node-id (get-in request [:query-params "node"])
+        reviewed? (= "true" (get-in request [:query-params "reviewed"]))]
+    (commit! #(progress/set-reviewed % node-id reviewed?)
+             (if reviewed? "Marked reviewed." "Returned to review inbox."))))
 
 (defn- edit-body! [request]
   (let [node-id (get-in request [:query-params "node"])
@@ -861,7 +904,7 @@
     [:post "/spawn"] (spawn-node! request)
     [:post "/complete"] (complete! request)
     [:post "/edit-body"] (edit-body! request)
-    [:post "/nothing-learned"] (nothing-learned! request)
+    [:post "/set-reviewed"] (set-reviewed! request)
     [:post "/resolve-existing"] (resolve-existing! request)
     [:post "/set-status"] (set-status! request)
     response/not-found))
