@@ -2,10 +2,13 @@
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest is use-fixtures]]
-            [dj.ai.tooling.progress-builder :as builder]))
+            [dj.ai.tooling.progress-builder :as builder]
+            [dj.recorder :as recorder]
+            [dj.recorder.patch :as recorder.patch]))
 
 (defn reset-state [test-fn]
-  (reset! builder/state builder/initial-state)
+  @(recorder/patch! builder/state
+                    (recorder.patch/->Replace builder/initial-state))
   (test-fn))
 
 (use-fixtures :each reset-state)
@@ -49,7 +52,7 @@
 (deftest topology-is-dense-with-root-and-node-local-editing
   (add-root "know" "Content remains prominent")
   (let [body (:body (builder/app {:request-method :get :uri "/"}))]
-    (is (str/includes? body "data-signals__ifmissing=\"{creatingRoot: false, showingModelView: false}\""))
+    (is (str/includes? body "data-signals__ifmissing=\"{creatingRoot: false, showingModelView: false, graphFilter: &apos;&apos;}\""))
     (is (str/includes? body "data-show=\"$creatingRoot\""))
     (is (str/includes? body "$editing_"))
     (is (str/includes? body "New node"))
@@ -66,8 +69,43 @@
       (is (str/includes? body "Answered"))
       (is (str/includes? body "ANSWERED"))
       (is (str/includes? body "answered by"))
+      (is (str/includes? body "Show this item with the outcome that resolved it"))
+      (is (str/includes? body "$graphFilter = &apos;resolution:"))
       (is (str/includes? body "Content matters."))
       (is (not (str/includes? body "&status=closed"))))))
+
+(deftest frontier-is-a-compact-filterable-view
+  (builder/record! {:kind :to-know :body "Which question is open?"})
+  (builder/record! {:kind :to-do :body "Run the next probe"})
+  (let [body (:body (builder/app {:request-method :get :uri "/"}))]
+    (is (str/includes? body "class=\"frontier-items\""))
+    (is (str/includes? body "Which question is open?"))
+    (is (str/includes? body "Run the next probe"))
+    (is (str/includes? body "results to review"))
+    (is (not (str/includes? body "awaiting synthesis")))
+    (is (str/includes? body "$graphFilter = &apos;questions&apos;"))
+    (is (str/includes? body "$graphFilter = &apos;context:"))
+    (is (str/includes? body "Show this item in its graph context"))
+    (is (str/includes? body "Showing focused graph context"))
+    (is (str/includes? body "$graphFilter = &apos;&apos;"))))
+
+(deftest open-status-focuses-an-agenda-node-with-ancestry-and-children
+  (let [root (builder/record! {:kind :know :body "Root context"})
+        question (builder/record! {:kind :to-know :body "Open question"
+                                   :spawned-by #{(:id root)}})
+        child (builder/record! {:kind :to-do :body "Direct probe"
+                                :spawned-by #{(:id question)}})
+        unrelated (builder/record! {:kind :know :body "Unrelated root"})
+        body (:body (builder/app {:request-method :get :uri "/"}))
+        context-filter (str "$graphFilter == &apos;context:" (:id question) "&apos;")]
+    (is (str/includes? body "class=\"status context-filter\""))
+    (is (str/includes? body "Show this item in its graph context"))
+    (is (= 3 (count (re-seq (re-pattern (java.util.regex.Pattern/quote context-filter))
+                            body))))
+    (is (not (str/includes?
+              (first (filter #(str/includes? % (:id unrelated))
+                             (str/split body #"<article")))
+              context-filter)))))
 
 (deftest repl-view-renders-content-without-record-mechanics
   (builder/record! {:kind :to-know :body "What matters?"})
@@ -134,7 +172,7 @@
   (add-root "done" "A result arrived")
   (let [done-id (first (get-in @builder/state [:graph :order]))]
     (is (str/includes? (:body (builder/app {:request-method :get :uri "/"}))
-                       "Synthesis inbox"))
+                       "Results to review"))
     (is (= 204 (:status
                 (builder/app (post-request "/nothing-learned" {"node" done-id} "{}")))))
     (is (true? (get-in @builder/state [:graph :nodes done-id :nothing-learned?])))))
@@ -155,6 +193,26 @@
     (is (not (str/includes? body "await @post")))
     (is (str/includes? body "; $draft_"))
     (is (str/includes? body "--depth:0"))))
+
+(deftest node-text-editing-is-distinct-from-spawning
+  (add-root "know" "Original text")
+  (let [node-id (first (get-in @builder/state [:graph :order]))
+        body-key (signal-id "bodyDraft" node-id)
+        page-body (:body (builder/app {:request-method :get :uri "/"}))]
+    (is (str/includes? page-body "Edit text"))
+    (is (str/includes? page-body "Add node"))
+    (is (str/includes? page-body "Node text"))
+    (is (str/includes? page-body "Save text"))
+    (is (str/includes? page-body "Spawn from this node"))
+    (is (not (str/includes? page-body "Click to edit this node")))
+    (is (str/includes? page-body "Click to show or hide node actions"))
+    (is (str/includes? page-body " = !$editing_"))
+    (is (str/includes? page-body "<span>Node actions</span></div>"))
+    (is (= 204 (:status
+                (builder/app
+                 (post-request "/edit-body" {"node" node-id}
+                               (str "{\"" body-key "\":\"Revised text\"}"))))))
+    (is (= "Revised text" (get-in @builder/state [:graph :nodes node-id :body])))))
 
 (deftest done-can-spawn-know-containing-punctuation
   (add-root "done" "Discussed graph usage")

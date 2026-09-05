@@ -2,9 +2,11 @@
   "Dev-only Datastar UI for manually exercising progress graphs.
 
   Start with `nix develop --command clojure -M:graph-builder`, then open
-  http://localhost:9090. The atom is intentionally the persistence boundary."
+  http://localhost:9090. A dj.recorder log is the persistence boundary."
   (:require [clojure.string :as str]
             [dj.ai.tooling.progress :as progress]
+            [dj.recorder :as recorder]
+            [dj.recorder.patch :as recorder.patch]
             [dj.web.datastar.assets :as assets]
             [dj.web.datastar.fused :as fused]
             [dj.web.datastar.mobile-resume :as mobile-resume]
@@ -18,8 +20,17 @@
   {:graph (progress/empty-graph)
    :notice nil})
 
-(defonce state (atom initial-state))
+(def ^:private state-path
+  (or (System/getProperty "dj.ai.tooling.progress.path")
+      (System/getenv "PROGRESS_GRAPH_PATH")
+      ".progress-graph.edn"))
+
+(defonce state (recorder/open state-path {:baseline initial-state}))
 (defonce subscriptions (subscribed/registry))
+
+(defn- transact! [f]
+  @(recorder/tx! state (fn [current]
+                         (recorder.patch/->Replace (f current)))))
 
 (defn topology
   "Returns the agent-facing projection of the live graph without exposing its
@@ -39,7 +50,7 @@
   (let [value (merge {:id (str (random-uuid))
                       :created-at (java.util.Date.)}
                      value)]
-    (swap! state update :graph progress/add-node value)
+    (transact! #(update % :graph progress/add-node value))
     (subscribed/mark-dirty! subscriptions)
     (some #(when (= (:id value) (:id %)) %) (:nodes (topology)))))
 
@@ -115,7 +126,32 @@
 (defn- short-body [graph node-id]
   (some-> (progress/node graph node-id) :body))
 
-(defn- node-card [graph node depth section-number previous-id]
+(defn- context-node-ids [graph focus-id]
+  (into #{focus-id}
+        (concat (map :id (progress/ancestors graph focus-id))
+                (map :id (progress/children graph focus-id)))))
+
+(defn- filter-expression [graph node frontier contexts]
+  (let [node-id (:id node)
+        question-ids (set (map :id (:to-knows frontier)))
+        action-ids (set (map :id (:to-dos frontier)))
+        synthesis-ids (set (map :id (:unsynthesized-dones frontier)))
+        resolution-targets (set (mapcat :resolves (ordered-nodes graph)))]
+    (str "$graphFilter == ''"
+         (when (question-ids node-id) " || $graphFilter == 'questions'")
+         (when (action-ids node-id) " || $graphFilter == 'actions'")
+         (when (synthesis-ids node-id) " || $graphFilter == 'synthesis'")
+         (when (resolution-targets node-id)
+           (str " || $graphFilter == 'resolution:" node-id "'"))
+         (apply str
+                (for [target-id (:resolves node)]
+                  (str " || $graphFilter == 'resolution:" target-id "'")))
+         (apply str
+                (for [[focus-id context-ids] contexts
+                      :when (context-ids node-id)]
+                  (str " || $graphFilter == 'context:" focus-id "'"))))))
+
+(defn- node-card [graph frontier contexts node depth section-number previous-id]
   (let [node-id (:id node)
         distant-parents (remove #{previous-id} (:spawned-by node))
         draft (signal-name "draft" node-id)
@@ -124,25 +160,50 @@
         artifact (signal-name "artifact" node-id)
         standing (signal-name "standing" node-id)
         done-note (signal-name "doneNote" node-id)
+        body-draft (signal-name "bodyDraft" node-id)
         editing (signal-name "editing" node-id)
         nodes (remove #(= node-id (:id %)) (ordered-nodes graph))]
     [:article.node-card {:data-kind (name (:kind node))
                          :data-section-start (boolean section-number)
+                         :data-show (filter-expression graph node frontier contexts)
                          :style (str "--depth:" depth)
                          :data-signals__ifmissing
                          (str "{" draft ": '', " also-from ": '', "
                               resolves ": '', " artifact ": '', " standing
-                              ": false, " done-note ": '', " editing ": false}")}
-     [:div.node-content {:data-on:click (str "$" editing " = true")
-                         :title "Click to edit this node"}
+                              ": false, " done-note ": '', " body-draft ": "
+                              (pr-str (:body node)) ", " editing ": false}")}
+     [:div.node-content
       [:header
        [:div.node-heading
         (when section-number [:span.sequence-number section-number])
         [:span.kind (get kind-labels (:kind node))]]
-       (when (progress/agenda? node)
-         [:span.status {:data-status (name (:status node))}
-          (lifecycle-label graph node)])]
-      [:p.body (:body node)]
+       [:div.node-card-actions
+        (when (progress/agenda? node)
+          (let [resolved? (and (= :closed (:status node))
+                               (seq (progress/resolved-by graph node-id)))]
+            (if resolved?
+              [:button.status.resolution-filter
+               {:type "button" :data-status (name (:status node))
+                :title "Show this item with the outcome that resolved it"
+                :data-on:click__stop (str "$graphFilter = 'resolution:" node-id "'")}
+               (lifecycle-label graph node)]
+              (if (#{:open :blocked} (:status node))
+                [:button.status.context-filter
+                 {:type "button" :data-status (name (:status node))
+                  :title "Show this item in its graph context"
+                  :data-on:click__stop (str "$graphFilter = 'context:" node-id "'")}
+                 (lifecycle-label graph node)]
+                [:span.status {:data-status (name (:status node))}
+                 (lifecycle-label graph node)]))))
+        [:button.edit-text {:type "button"
+                            :data-on:click__stop (str "$" editing " = true")}
+         "Edit text"]
+        [:button.add-node {:type "button"
+                           :data-on:click__stop (str "$" editing " = true")}
+         "Add node"]]]
+      [:p.body {:title "Click to show or hide node actions"
+                :data-on:click (str "$" editing " = !$" editing)}
+       (:body node)]
       (when (seq distant-parents)
         [:div.lineage
          (for [parent-id distant-parents]
@@ -162,15 +223,20 @@
       (when (progress/synthesis-pending? graph node-id)
         [:div.synthesis-badge "Awaiting synthesis"])]
      [:div.node-controls {:data-show (str "$" editing)}
-      [:div.control-heading
-       [:span "Edit node"]
-       [:button {:type "button" :data-on:click (str "$" editing " = false")}
-        "Close"]]
+      [:div.control-heading [:span "Node actions"]]
+      [:form.body-editor
+       [:label.field
+        [:span "Node text"]
+        [:textarea {:data-bind body-draft :rows "2"}]]
+       [:button.primary {:type "button"
+                         :data-on:click (str "@post('/edit-body?node=" node-id "')")}
+        "Save text"]]
       [:details.inspector
        [:summary "Inspect"]
        [:code.id node-id]
        (edge-list "resolved by" (map :id (progress/resolved-by graph node-id)))]
       [:div.local-editor
+       [:div.composer-label "Spawn from this node"]
        [:textarea {:data-bind draft :rows "2" :placeholder "Spawn a thought from here…"}]
        [:div.kind-actions
         (for [kind [:done :know :to-know :to-do]]
@@ -206,7 +272,7 @@
 (defn- synthesis-inbox [graph]
   (when-let [dones (seq (progress/unsynthesized-dones graph))]
     [:section.inbox
-     [:div.section-heading [:h2 "Synthesis inbox"] [:span (count dones)]]
+     [:div.section-heading [:h2 "Results to review"] [:span (count dones)]]
      (for [done dones]
        [:div.inbox-item
         [:span (:body done)]
@@ -215,27 +281,45 @@
                    :data-on:click (str "@post('/nothing-learned?node=" (:id done) "')")}
           "Nothing learned"]]])]))
 
-(defn- frontier-summary [graph]
-  (let [{:keys [to-knows to-dos unsynthesized-dones]} (progress/frontier graph)]
+(defn- frontier-group [filter-value label nodes]
+  [:section.frontier-group
+   [:button.frontier-heading
+    {:type "button" :data-on:click (str "$graphFilter = '" filter-value "'")}
+    [:strong (count nodes)] [:span label]]
+   (if (seq nodes)
+     [:ol.frontier-items
+      (for [node nodes]
+        [:li [:button {:type "button"
+                       :title "Show this item in its graph context"
+                       :data-on:click (str "$graphFilter = 'context:" (:id node) "'")}
+              (:body node)]])]
+     [:p.frontier-empty "None"])])
+
+(defn- frontier-summary [frontier]
+  (let [{:keys [to-knows to-dos unsynthesized-dones]} frontier]
     [:section.frontier
-     [:div [:strong (count to-knows)] [:span " open questions"]]
-     [:div [:strong (count to-dos)] [:span " open actions"]]
-     [:div [:strong (count unsynthesized-dones)] [:span " awaiting synthesis"]]]))
+     (frontier-group "questions" "open questions" to-knows)
+     (frontier-group "actions" "open actions" to-dos)
+     (frontier-group "synthesis" "results to review" unsynthesized-dones)]))
 
 (defn main-view []
   (let [{:keys [graph notice]} @state
         topology (progress/topology graph)
         nodes (progress/topology-layout topology)
+        frontier (:frontier topology)
+        contexts (into {} (map (fn [node]
+                                 [(:id node) (context-node-ids graph (:id node))]))
+                       nodes)
         roots (set (:roots topology))
         section-numbers (zipmap (:roots topology) (map inc (range)))]
-    [:main#app {:data-signals__ifmissing "{creatingRoot: false, showingModelView: false}"}
+    [:main#app {:data-signals__ifmissing "{creatingRoot: false, showingModelView: false, graphFilter: ''}"}
      [:section.hero
       [:p.eyebrow "dj.ai.tooling / dev"]
       [:h1 "Progress graph builder"]
       [:p "Manually exercise the graph primitives. State lives only in this process."]]
      (when notice
        [:aside.notice {:data-level (name (:level notice))} (:message notice)])
-     (frontier-summary graph)
+     (frontier-summary frontier)
      [:div {:data-show "$creatingRoot"} (root-form graph)]
      (synthesis-inbox graph)
      [:section.graph
@@ -254,11 +338,14 @@
         [:span "Raw LLM rendered view"]
         [:button {:type "button" :data-on:click "$showingModelView = false"} "Close"]]
        [:pre (view)]]
+      [:div.filter-bar {:data-show "$graphFilter != ''"}
+       [:span "Showing focused graph context"]
+       [:button {:type "button" :data-on:click "$graphFilter = ''"} "Show all"]]
       (if (seq nodes)
         [:div.node-list
          (map-indexed
           (fn [index node]
-            (node-card graph node (:display-depth node)
+            (node-card graph frontier contexts node (:display-depth node)
                        (when (roots (:id node)) (section-numbers (:id node)))
                        (:id (get nodes (dec index)))))
           nodes)]
@@ -277,9 +364,15 @@
   .notice { border: 1px solid #496454; background: #17221b; border-radius: .75rem; padding: .9rem 1rem; margin-bottom: 1rem; }
   .notice[data-level=error] { border-color: #a75454; background: #291818; color: #ffc1c1; }
   .frontier { display: grid; grid-template-columns: repeat(3, 1fr); gap: .7rem; margin-bottom: 1rem; }
-  .frontier div { background: #171c18; border: 1px solid #2c352e; border-radius: .8rem; padding: 1rem; }
+  .frontier-group { min-width: 0; background: #171c18; border: 1px solid #2c352e; border-radius: .8rem; padding: .65rem; }
+  .frontier-heading { width: 100%; border: 0; background: transparent; padding: .35rem; text-align: left; }
+  .frontier-heading:hover { background: #202923; }
   .frontier strong { font-size: 1.6rem; margin-right: .4rem; color: #8fdda9; }
   .frontier span { color: #a8b4aa; }
+  .frontier-items { display: grid; gap: .18rem; margin: .35rem 0 0; padding: 0; list-style: none; }
+  .frontier-items button { width: 100%; border: 0; background: transparent; padding: .3rem .35rem; color: #cbd4cc; font-size: .76rem; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .frontier-items button:hover { background: #202923; color: #fff; }
+  .frontier-empty { margin: .4rem .35rem .25rem; color: #718078; font-size: .76rem; }
   .editor { background: #e9eee9; color: #162019; border-radius: 1rem; padding: 1.25rem; box-shadow: 0 1.5rem 4rem #0008; }
   .form-heading, .section-heading, .node-card header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
   .form-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1rem; margin-top: 1.25rem; }
@@ -295,9 +388,13 @@
   .node-list { display: grid; gap: 1rem; align-items: start; padding: .5rem; } .node-card { position: relative; width: min(48rem, calc(100% - var(--depth) * 2rem)); margin-left: calc(var(--depth) * 2rem); background: #171c18; border: 1px solid #2c352e; border-left: .3rem solid #778079; border-radius: .75rem; padding: 1rem; }
   .node-card[data-section-start=true] { margin-top: 1.65rem; } .node-card:first-child { margin-top: 0; }
   .node-heading { display: flex; align-items: center; gap: .5rem; } .sequence-number { display: inline-grid; place-items: center; min-width: 1.45rem; height: 1.45rem; padding: 0 .35rem; border-radius: 999px; background: #29352d; color: #c8d4ca; font-size: .7rem; font-weight: 800; }
+  .node-card-actions { display: flex; align-items: center; gap: .35rem; }
+  .edit-text, .add-node { border: 0; background: transparent; padding: .2rem .35rem; color: #a8b4aa; font-size: .72rem; }
   .node-card[style*=\"--depth:0\"] { width: min(48rem, 100%); }
   .node-card[data-kind=know] { border-left-color: #8fdda9; } .node-card[data-kind=done] { border-left-color: #6eafdf; } .node-card[data-kind=to-know] { border-left-color: #dbb167; } .node-card[data-kind=to-do] { border-left-color: #d77c7c; }
   .kind { font-size: .75rem; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; } .status { color: #a8b4aa; font-size: .75rem; }
+  .resolution-filter { border: 0; background: transparent; padding: .2rem .35rem; text-decoration: underline; text-decoration-color: #526259; text-underline-offset: .2rem; }
+  .context-filter { border: 0; background: transparent; padding: .2rem .35rem; text-decoration: underline; text-decoration-color: #526259; text-underline-offset: .2rem; }
   .status[data-status=blocked], .status[data-status=cancelled] { color: #e6a1a1; } .body { font-size: 1.05rem; margin: .8rem 0 .45rem; white-space: pre-wrap; }
   .id { display: block; color: #718078; font-size: .68rem; overflow-wrap: anywhere; margin: .55rem 0; }
   .edges { color: #a8b4aa; font-size: .75rem; margin-top: .25rem; } .edges span { color: #718078; margin-right: .45rem; }
@@ -307,6 +404,9 @@
   .pin-line, .synthesis-badge { color: #8fdda9; font-size: .72rem; margin: .4rem 0; } .synthesis-badge { color: #dbb167; }
   .inspector { color: #718078; font-size: .72rem; margin: .5rem 0; } .inspector summary, .join summary { cursor: pointer; }
   .local-editor { border-top: 1px solid #2c352e; padding-top: .75rem; margin-top: .75rem; } .local-editor textarea { background: #f7faf7; min-height: 6rem; }
+  .body-editor { display: grid; grid-template-columns: 1fr auto; align-items: end; gap: .45rem; margin-top: .65rem; }
+  .body-editor textarea { min-height: 4rem; }
+  .composer-label { margin-bottom: .4rem; color: #b8c6ba; font-size: .75rem; font-weight: 700; }
   main { padding-top: 2rem; } .hero { margin-bottom: 1rem; } .hero h1 { font-size: clamp(2rem, 5vw, 3.4rem); }
   .graph { margin-top: 1.25rem; } .node-list { gap: .4rem; padding-top: 0; }
   .node-card { padding: .55rem .75rem; border-radius: .45rem; width: min(60rem, calc(100% - var(--depth) * 1.35rem)); margin-left: calc(var(--depth) * 1.35rem); }
@@ -317,6 +417,7 @@
   .control-heading { display: flex; align-items: center; justify-content: space-between; color: #8fdda9; font-size: .72rem; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; }
   .model-view { margin-bottom: 1rem; padding: .8rem; border: 1px solid #496454; border-radius: .65rem; background: #0b0e0c; }
   .model-view pre { margin: .7rem 0 0; color: #d7e1d8; font: .76rem/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .filter-bar { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: .65rem; padding: .55rem .7rem; border: 1px solid #496454; border-radius: .55rem; background: #17221b; color: #b8c6ba; font-size: .76rem; }
   .join { margin-top: .65rem; color: #a8b4aa; font-size: .75rem; } .join .field { margin-top: .5rem; }
   .complete-editor { display: grid; grid-template-columns: 1fr auto; gap: .45rem; margin-top: .7rem; } .complete-editor input { min-width: 0; }
   .inbox-item { display: flex; justify-content: space-between; gap: 1rem; align-items: center; padding: .8rem; border: 1px solid #4b4029; background: #211d15; border-radius: .65rem; margin-bottom: .5rem; }
@@ -343,12 +444,12 @@
 
 (defn- commit! [update-fn success-message]
   (try
-    (swap! state (fn [{:keys [graph] :as current}]
-                   (assoc current
-                          :graph (update-fn graph)
-                          :notice {:level :success :message success-message})))
+    (transact! (fn [{:keys [graph] :as current}]
+                 (assoc current
+                        :graph (update-fn graph)
+                        :notice {:level :success :message success-message})))
     (catch clojure.lang.ExceptionInfo error
-      (swap! state assoc :notice {:level :error :message (ex-message error)})))
+      (transact! #(assoc % :notice {:level :error :message (ex-message error)}))))
   (subscribed/mark-dirty! subscriptions)
   {:status 204})
 
@@ -399,6 +500,12 @@
     (commit! #(progress/mark-nothing-learned % node-id)
              "Marked nothing learned.")))
 
+(defn- edit-body! [request]
+  (let [node-id (get-in request [:query-params "node"])
+        body (get (fused/signals request)
+                  (keyword (signal-name "bodyDraft" node-id)))]
+    (commit! #(progress/edit-body % node-id body) "Node text updated.")))
+
 (defn- set-status! [request]
   (let [node-id (get-in request [:query-params "node"])
         status (some #(when (= (get-in request [:query-params "status"]) (name %)) %)
@@ -413,6 +520,7 @@
     [:post "/add-root"] (add-root! request)
     [:post "/spawn"] (spawn-node! request)
     [:post "/complete"] (complete! request)
+    [:post "/edit-body"] (edit-body! request)
     [:post "/nothing-learned"] (nothing-learned! request)
     [:post "/set-status"] (set-status! request)
     response/not-found))
@@ -428,6 +536,7 @@
     (.addShutdownHook
      (Runtime/getRuntime)
      (Thread. #(do (http/stop! server)
+                   (recorder/close! state)
                    (nrepl/stop-server repl))))
     (println (str "progress graph builder: http://localhost:" (http/port server)))
     (println (str "nREPL server: 127.0.0.1:" (:port repl) " (.nrepl-port)"))

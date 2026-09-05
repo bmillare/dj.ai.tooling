@@ -298,3 +298,13 @@
     (is (= :open (:status (progress/node graph :q))))
     (is (= [{:kind :url :ref "https://example.test"}]
            (:artifacts (progress/node graph :q))))))
+
+(deftest edit-body-preserves-node-identity-and-relations
+  (let [graph (-> (progress/empty-graph)
+                  (add :root :know "Original text" [] 0)
+                  (add :child :to-know "Question?" [:root] 1)
+                  (progress/edit-body :root "Revised text"))]
+    (is (= "Revised text" (:body (progress/node graph :root))))
+    (is (= [:child] (mapv :id (progress/children graph :root))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"non-blank"
+                          (progress/edit-body graph :root "  ")))))

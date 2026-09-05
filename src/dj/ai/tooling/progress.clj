@@ -166,6 +166,15 @@
     (fail "Progress node has an unknown :status." {:node-id node-id :status status}))
   (assoc-in graph [:nodes node-id :status] status))
 
+(defn edit-body
+  "Replaces a node's prose without changing its identity or graph relations."
+  [graph node-id body]
+  (require-node graph node-id :edit-target)
+  (when-not (and (string? body) (not (str/blank? body)))
+    (fail "Progress node requires a non-blank :body."
+          {:node-id node-id :body body}))
+  (assoc-in graph [:nodes node-id :body] body))
+
 (defn attach-artifact [graph node-id artifact]
   (require-node graph node-id :artifact-target)
   (update-in graph [:nodes node-id :artifacts] (fnil conj []) artifact))

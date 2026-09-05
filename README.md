@@ -268,18 +268,18 @@ by refinement from observed model and integration behavior.
 
 ### Progress graph builder
 
-The dev-only graph builder manually exercises the progress core with an
-in-process atom as its temporary persistence boundary:
+The dev-only graph builder manually exercises the progress core with a
+`dj.recorder`-backed durable reference:
 
 ```bash
 nix develop --command clojure -M:graph-builder
 ```
 
 Open `http://localhost:9090` (or set `PORT`). The UI uses dj.web's
-current-state Datastar shape: commands commit graph state and return `204`, one
+current-state Datastar shape: commands durably commit graph state and return `204`, one
 long-lived subscription re-renders the full `<main>`, and browser signals hold
 only form drafts. The topology-first surface supports separate root creation,
-node-local four-kind capture, explicit joins and resolution links, artifact
+node-local text editing and four-kind capture, explicit joins and resolution links, artifact
 references, standing Knows, agenda-only workflow controls, and one-command To
 Do completion with an optional note. Unsynthesized Dones appear in a small
 inbox; knowledge captured anywhere in the resolved To Do's subtree counts as
@@ -288,14 +288,16 @@ successful node-local capture clears its draft.
 
 The pure `progress/topology` query projects capture-ordered nodes with direct
 `:spawn-children` and `:resolved-by` edges, plus roots and the derived frontier.
-Restarting the process clears the graph.
+Graph state survives process restarts in the append-only `.progress-graph.edn`
+log. Set `PROGRESS_GRAPH_PATH` to use another location.
 
-The topology is always rendered in its condensed form. Click a node's content
-to expose authoring and workflow controls for only that node, then close it to
-return the card to its dense form. `New node` beside the node count reveals the
-root capture form; there is no global editing mode. `LLM view` shows the exact
-compact text returned by `progress-builder/view` so a human can inspect the
-model-facing projection.
+The topology is always rendered in its condensed form. Clicking a node's text
+toggles its action panel; explicit `Edit text` and `Add node` buttons also open
+it. Editing the current node is visually separate from spawning a connected
+node, and clicking the node text again returns the card to its dense form.
+`New node` beside the node count reveals the root capture form; there is no
+global editing mode. `LLM view` shows the exact compact text returned by
+`progress-builder/view` so a human can inspect the model-facing projection.
 
 The display groups each root with its complete spawn subtree even when a child
 is captured after a later root. Numbered root sections and extra spacing mark
@@ -316,11 +318,12 @@ port and writes that port to `.nrepl-port`. This is the preferred live agent
 seam: call `dj.ai.tooling.progress-builder/topology` for structured graph data,
 `dj.ai.tooling.progress-builder/view` for dense model-facing text, and
 `dj.ai.tooling.progress-builder/record!` to add nodes without accessing the
-backing atom. `view` omits UUIDs, timestamps, empty fields, and repeated frontier
+built-in recorder handle. `view` omits UUIDs, timestamps, empty fields, and repeated frontier
 bodies while retaining short aliases, topology, joins, resolutions, lifecycle
-state, pins, and artifact references. The state atom and subscription registry
-are `defonce`,
-so reloading the builder namespace preserves the live graph. For example, with `clj-nrepl-eval` from
+state, pins, and artifact references. The recorder handle and subscription
+registry are `defonce`, so reloading the builder namespace preserves the live
+graph. The shutdown hook drains and closes the recorder before releasing its
+file lock. For example, with `clj-nrepl-eval` from
 `clojure-mcp-light` installed:
 
 ```bash

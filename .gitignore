@@ -2,6 +2,9 @@
 .direnv/
 target/
 .nrepl-port
+.progress-graph.edn
+.progress-graph.edn.lock
+.progress-graph.edn.lock_status
 .calva/
 .clj-kondo/.cache/
 
