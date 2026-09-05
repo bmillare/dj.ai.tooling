@@ -287,7 +287,22 @@
     (is (= [:root-a :child-a :fork-a :linear :fork-b :root-b]
            (mapv :id layout)))
     (is (= [0 0 1 1 1 0]
-           (mapv :display-depth layout)))))
+           (mapv :display-depth layout)))
+    (is (= [[] [] [:branch] [:rail] [:last-branch] []]
+           (mapv :gutter layout)))))
+
+(deftest topology-render-draws-fork-rails
+  (let [graph (-> (progress/empty-graph)
+                  (add :k :know "Two leads" [] 0)
+                  (add :q1 :to-know "Lead one?" [:k] 1)
+                  (add :a1 :to-do "Chase lead one" [:q1] 2)
+                  (add :q2 :to-know "Lead two?" [:k] 3))
+        rendered (progress/render-topology (progress/topology graph))]
+    (is (str/includes? rendered
+                       (str "[K1] KNOW: Two leads\n"
+                            "├╴[Q1] TO KNOW: Lead one?\n"
+                            "│ [A1] TO DO: Chase lead one\n"
+                            "└╴[Q2] TO KNOW: Lead two?")))))
 
 (deftest updates-preserve-existing-data
   (let [graph (-> (progress/empty-graph)

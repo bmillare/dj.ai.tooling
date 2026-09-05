@@ -345,32 +345,81 @@
            {:counts {} :aliases {}}
            nodes)))
 
+(defn- add-fork-lane
+  "Prepends one gutter lane to an emitted branch. The branch's first node
+  carries the connector; the rest carry the vertical continuation, which stays
+  blank once no later sibling branch needs a rail through this block."
+  [branch last?]
+  (into []
+        (map-indexed
+         (fn [line node]
+           (update node :gutter
+                   #(into [(if (zero? line)
+                             (if last? :last-branch :branch)
+                             (if last? :blank :rail))]
+                          %))))
+        branch))
+
 (defn topology-layout
-  "Returns nodes in a stable, parent-grouped display order with indentation
-  lanes only where a parent forks. A joined node is emitted once, beneath the
-  first parent reached by the root-ordered depth-first walk."
+  "Returns nodes in a stable, parent-grouped display order. Each node carries a
+  `:gutter` of lane cells (`:branch`, `:last-branch`, `:rail`, `:blank`) that
+  renderers draw as fork rails, plus `:display-depth` (the lane count). Lanes
+  open only where a parent actually forks into more than one emitted branch,
+  and a joined node is emitted once, beneath the first parent reached by the
+  root-ordered depth-first walk."
   [{:keys [roots nodes]}]
   (let [by-id (into {} (map (juxt :id identity)) nodes)
-        walk (fn walk [result seen node-id depth]
+        ;; Returns [emitted seen]; `emitted` nodes carry gutters relative to
+        ;; this subtree, so a fork's branch count reflects only the branches
+        ;; actually emitted beneath it (a join swallowed by an earlier sibling
+        ;; opens no lane).
+        walk (fn walk [seen node-id]
                (if (contains? seen node-id)
-                 [result seen]
+                 [[] seen]
                  (let [node (by-id node-id)
-                       children (:spawn-children node)
-                       child-depth (+ depth (if (> (count children) 1) 1 0))]
-                   (reduce (fn [[result seen] child-id]
-                             (walk result seen child-id child-depth))
-                           [(conj result (assoc node :display-depth depth))
-                            (conj seen node-id)]
-                           children))))
+                       [branches seen]
+                       (reduce (fn [[branches seen] child-id]
+                                 (let [[branch seen] (walk seen child-id)]
+                                   [(cond-> branches
+                                      (seq branch) (conj branch))
+                                    seen]))
+                               [[] (conj seen node-id)]
+                               (:spawn-children node))
+                       fork? (> (count branches) 1)
+                       descendants
+                       (if fork?
+                         (into []
+                               (mapcat (fn [index branch]
+                                         (add-fork-lane
+                                          branch
+                                          (= index (dec (count branches)))))
+                                       (range) branches))
+                         (into [] cat branches))]
+                   [(into [(assoc node :gutter [])] descendants) seen])))
         starts (concat roots (map :id nodes))]
     (first
      (reduce (fn [[result seen] node-id]
-               (walk result seen node-id 0))
+               (let [[emitted seen] (walk seen node-id)]
+                 [(into result
+                        (map #(assoc % :display-depth (count (:gutter %))))
+                        emitted)
+                  seen]))
              [[] #{}]
              starts))))
 
 (defn- alias-list [aliases ids]
   (str/join ", " (sort (keep aliases ids))))
+
+(def ^:private gutter-glyphs
+  {:branch "├╴" :last-branch "└╴" :rail "│ " :blank "  "})
+
+(def ^:private gutter-continuation
+  "A branch connector occupies only its first line; below it the lane holds a
+  plain rail (or blank once the last branch has started)."
+  {:branch :rail :last-branch :blank :rail :rail :blank :blank})
+
+(defn- gutter-prefix [gutter]
+  (str/join (map gutter-glyphs gutter)))
 
 (defn render-topology
   "Renders a topology projection as dense model-facing text.
@@ -387,10 +436,11 @@
                      " | actions: " (or (not-empty (alias-list aliases (frontier-ids :to-dos))) "none")
                      " | synthesis: " (or (not-empty (alias-list aliases (frontier-ids :unsynthesized-dones))) "none"))
         render-node
-        (fn [{:keys [id kind body status spawned-by resolves resolved-by pinned-under artifacts display-depth]}]
+        (fn [{:keys [id kind body status spawned-by resolves resolved-by pinned-under artifacts gutter]}]
           (let [[_ label] (render-kind kind)
-                indent (str/join (repeat (* 2 display-depth) " "))
-                body (str/replace body "\n" (str "\n" indent "  "))
+                prefix (gutter-prefix gutter)
+                continuation (gutter-prefix (map gutter-continuation gutter))
+                body (str/replace body "\n" (str "\n" continuation "  "))
                 joins (when (> (count spawned-by) 1)
                         (str " | from " (alias-list aliases spawned-by)))
                 resolution (when (seq resolves)
@@ -403,7 +453,7 @@
                 pin (when pinned-under (str " | pinned under " (aliases pinned-under)))
                 refs (when (seq artifacts)
                        (str " | refs " (str/join ", " (map :ref artifacts))))]
-            (str indent "[" (aliases id) "] " label ": " body
+            (str prefix "[" (aliases id) "] " label ": " body
                  joins resolution state pin refs)))]
     (str summary
          (when (seq nodes) "\n\n")

@@ -103,8 +103,8 @@
     (is (= 3 (count (re-seq (re-pattern (java.util.regex.Pattern/quote context-filter))
                             body))))
     (is (not (str/includes?
-              (first (filter #(str/includes? % (:id unrelated))
-                             (str/split body #"<article")))
+              (first (filter #(str/includes? % (signal-id "bodyDraft" (:id unrelated)))
+                             (str/split body #"<div class=\"node-row\"")))
               context-filter)))))
 
 (deftest repl-view-renders-content-without-record-mechanics
@@ -186,13 +186,14 @@
   (is (= :error (get-in @builder/state [:notice :level])))
   (is (str/includes? (get-in @builder/state [:notice :message]) "does not exist")))
 
-(deftest node-local-authoring-resets-draft-and-renders-vertical-depth
+(deftest node-local-authoring-resets-draft-and-renders-rail-rows
   (add-root "know" "Root")
   (let [body (:body (builder/app {:request-method :get :uri "/"}))]
     (is (str/includes? body "@post"))
     (is (not (str/includes? body "await @post")))
     (is (str/includes? body "; $draft_"))
-    (is (str/includes? body "--depth:0"))))
+    (is (str/includes? body "class=\"node-row\""))
+    (is (str/includes? body "class=\"rails\""))))
 
 (deftest node-text-editing-is-distinct-from-spawning
   (add-root "know" "Original text")
