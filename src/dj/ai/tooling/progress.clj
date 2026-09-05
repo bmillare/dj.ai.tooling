@@ -83,7 +83,7 @@
 
 (defn- validate-new-node [graph value]
   (let [{:keys [id kind body status spawned-by resolves pinned-under
-                created-at reviewed? author]} value]
+                created-at author]} value]
     (when (nil? id) (fail "Progress node requires :id." {:node value}))
     (when (node graph id)
       (fail "Progress node id already exists." {:node-id id}))
@@ -105,10 +105,6 @@
         (fail "Only Know nodes may be standing context."
               {:node-id id :kind kind}))
       (require-node graph pinned-under :pinned-under))
-    (when (and (contains? value :reviewed?)
-               (or (not= :done kind) (not (boolean? reviewed?))))
-      (fail ":reviewed? is a boolean available only on Done nodes."
-            {:node-id id :kind kind :reviewed? reviewed?}))
     (when (contains? value :author)
       (validate-author id author))))
 
@@ -202,18 +198,6 @@
   (require-node graph node-id :artifact-target)
   (update-in graph [:nodes node-id :artifacts] (fnil conj []) artifact))
 
-(defn set-reviewed
-  "Sets or clears the reversible read mark on a Done. Reviewed records only
-  that someone has looked at the result; it claims nothing about what was
-  learned, a later Know can still synthesize the Done, and clearing the mark
-  returns the Done to the synthesis inbox."
-  [graph node-id reviewed?]
-  (let [value (require-node graph node-id :synthesis-candidate)]
-    (when-not (= :done (:kind value))
-      (fail "Only a Done can be marked reviewed."
-            {:node-id node-id :kind (:kind value)}))
-    (assoc-in graph [:nodes node-id :reviewed?] (boolean reviewed?))))
-
 (defn children
   "Returns direct spawn children in capture order. O(out-degree)."
   [graph node-id]
@@ -261,9 +245,7 @@
 (defn- in-scope? [scope-ids candidate-id]
   (or (nil? scope-ids) (contains? scope-ids candidate-id)))
 
-(defn- pending-synthesis-in
-  "Non-cancelled Dones with no synthesized Know, reviewed or not."
-  [graph scope-ids]
+(defn- unsynthesized-dones-in [graph scope-ids]
   (let [active-know? #(and (= :know (:kind %))
                             (not= :cancelled (:status %)))
         active-know-ids (into []
@@ -296,24 +278,14 @@
                               (not (synthesized? %)))))
           (:order graph))))
 
-(defn- unsynthesized-dones-in [graph scope-ids]
-  (filterv #(not (:reviewed? %)) (pending-synthesis-in graph scope-ids)))
-
 (defn unsynthesized-dones
   "Returns non-cancelled Dones pending synthesis. A Done is synthesized by a
   spawned Know or a Know already captured in the subtree of a To Do that the
-  Done resolves; a Done marked reviewed (see set-reviewed) is excluded as
-  read but stays queryable via reviewed-dones."
+  Done resolves. Everything pending stays visible until a Know closes it —
+  there is no read mark to shelve a result without synthesizing it."
   ([graph] (unsynthesized-dones graph {}))
   ([graph {:keys [scope]}]
    (unsynthesized-dones-in graph (scope-node-ids graph scope))))
-
-(defn reviewed-dones
-  "Returns reviewed Dones that still lack a synthesized Know: set-reviewed
-  removes a Done from the inbox, but this query keeps it reachable and
-  un-reviewable rather than gone."
-  [graph]
-  (filterv :reviewed? (pending-synthesis-in graph nil)))
 
 (defn frontier
   "Returns the understanding agenda, activity agenda, and synthesis inbox."

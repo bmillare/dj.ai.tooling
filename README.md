@@ -284,11 +284,8 @@ node-local text editing and four-kind capture, explicit joins and resolution lin
 references, standing Knows, agenda-only workflow controls, and one-command To
 Do completion with an optional note. Unsynthesized Dones appear in a small
 inbox; knowledge captured anywhere in the resolved To Do's subtree counts as
-synthesis. An inbox item can be marked reviewed — a reversible read mark
-recording only that someone looked, never a claim that nothing was learned.
-Reviewed-but-unsynthesized Dones move to a collapsed section of the inbox
-(one click to unmark) and stay queryable via `progress/reviewed-dones`; over
-nREPL, `(review! "D4")` and `(review! "D4" false)` set and clear the mark. The topology reads downward with visible depth guides, and a
+synthesis. The inbox has no shelving controls: a pending result stays listed
+until a Know properly closes it. The topology reads downward with visible depth guides, and a
 successful node-local capture clears its draft.
 
 The pure `progress/topology` query projects capture-ordered nodes with direct

@@ -61,12 +61,7 @@
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Only Know"
                           (progress/add-node graph
                                              {:id :task :kind :to-do :body "Work"
-                                              :pinned-under :root :created-at at})))
-    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"only on Done"
-                          (progress/add-node graph
-                                             {:id :fact :kind :know :body "Fact"
-                                              :reviewed? true
-                                              :created-at at})))))
+                                              :pinned-under :root :created-at at})))))
 
 (deftest authorship-is-optional-validated-and-rendered
   (let [at #inst "2026-09-04"
@@ -159,17 +154,6 @@
            (mapv :id (progress/candidates graph {:scope :root
                                                   :include-blocked? true}))))))
 
-(deftest reviewed-mark-is-reversible-inbox-bookkeeping
-  (let [graph (progress/add-node
-               (progress/empty-graph)
-               {:id :done :kind :done :body "Experiment result read."
-                :reviewed? true :created-at #inst "2026-09-04"})]
-    (is (empty? (progress/unsynthesized-dones graph)))
-    (is (= [:done] (mapv :id (progress/reviewed-dones graph))))
-    (let [unread (progress/set-reviewed graph :done false)]
-      (is (= [:done] (mapv :id (progress/unsynthesized-dones unread))))
-      (is (empty? (progress/reviewed-dones unread))))))
-
 (deftest completion-is-kind-aware-and-atomic
   (let [graph (-> (progress/empty-graph)
                   (add :todo :to-do "Run it" [] 0)
@@ -213,9 +197,7 @@
                   (progress/complete :todo {:id :done :body "Finished"
                                             :created-at #inst "2026-09-04T00:02:00Z"}))]
     (is (= [:done] (mapv :id (progress/unsynthesized-dones graph))))
-    (is (progress/synthesis-pending? graph :done))
-    (is (empty? (progress/unsynthesized-dones
-                 (progress/set-reviewed graph :done true))))))
+    (is (progress/synthesis-pending? graph :done))))
 
 (deftest status-is-current-state-and-resolution-is-provenance
   (let [resolved (-> (progress/empty-graph)

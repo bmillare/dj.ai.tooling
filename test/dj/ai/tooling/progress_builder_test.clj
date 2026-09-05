@@ -54,7 +54,7 @@
 (deftest topology-is-dense-with-root-and-node-local-editing
   (add-root "know" "Content remains prominent")
   (let [body (:body (builder/app {:request-method :get :uri "/"}))]
-    (is (str/includes? body "data-signals__ifmissing=\"{creatingRoot: false, showingModelView: false, showingChanges: false, showingReviewed: false, changesCursor: &apos;&apos;, graphFilter: &apos;&apos;}\""))
+    (is (str/includes? body "data-signals__ifmissing=\"{creatingRoot: false, showingModelView: false, showingChanges: false, changesCursor: &apos;&apos;, graphFilter: &apos;&apos;}\""))
     (is (str/includes? body "data-show=\"$creatingRoot\""))
     (is (str/includes? body "$editing_"))
     (is (str/includes? body "New node"))
@@ -325,23 +325,12 @@
     (is (= "Completed." (get-in graph [:nodes done-id :body])))
     (is (= #{todo-id} (get-in graph [:nodes done-id :resolves])))))
 
-(deftest synthesis-inbox-review-mark-is-reversible
+(deftest synthesis-inbox-lists-pending-dones-without-shelving-controls
   (add-root "done" "A result arrived")
-  (let [done-id (first (get-in @builder/state [:graph :order]))]
-    (is (str/includes? (:body (builder/app {:request-method :get :uri "/"}))
-                       "Results to review"))
-    (is (= 204 (:status
-                (builder/app (post-request "/set-reviewed"
-                                           {"node" done-id "reviewed" "true"}
-                                           "{}")))))
-    (is (true? (get-in @builder/state [:graph :nodes done-id :reviewed?])))
-    (is (str/includes? (:body (builder/app {:request-method :get :uri "/"}))
-                       "Reviewed, no Know yet"))
-    (is (= 204 (:status
-                (builder/app (post-request "/set-reviewed"
-                                           {"node" done-id "reviewed" "false"}
-                                           "{}")))))
-    (is (false? (get-in @builder/state [:graph :nodes done-id :reviewed?])))))
+  (let [body (:body (builder/app {:request-method :get :uri "/"}))]
+    (is (str/includes? body "Results to review"))
+    (is (not (str/includes? body "Mark reviewed")))
+    (is (not (str/includes? body "Reviewed, no Know yet")))))
 
 (deftest invalid-command-is-visible-and-does-not-change-graph
   (is (= 204 (:status
