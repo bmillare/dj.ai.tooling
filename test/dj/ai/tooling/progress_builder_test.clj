@@ -88,8 +88,29 @@
     (is (str/includes? body "$graphFilter = &apos;questions&apos;"))
     (is (str/includes? body "$graphFilter = &apos;context:"))
     (is (str/includes? body "Show this item in its graph context"))
-    (is (str/includes? body "Showing focused graph context"))
+    (is (str/includes? body "class=\"filter-chips\""))
     (is (str/includes? body "$graphFilter = &apos;&apos;"))))
+
+(deftest filter-chips-remove-individual-lenses
+  (let [root (builder/record! {:kind :know :body "Root"})
+        question (builder/record! {:kind :to-know :body "Open question"
+                                   :spawned-by #{(:id root)}})
+        body (:body (builder/app {:request-method :get :uri "/"}))]
+    ;; every possible lens has a server-rendered chip toggled by its token
+    (is (str/includes? body ">questions<span class=\"chip-x\""))
+    (is (str/includes? body ">current work<span class=\"chip-x\""))
+    (is (str/includes? body (str ">context: K1<span class=\"chip-x\"")))
+    (is (str/includes? body (str ">context: Q1<span class=\"chip-x\"")))
+    (is (str/includes?
+         body
+         (str "data-show=\"(&apos; &apos;+$graphFilter+&apos; &apos;).includes(&apos; context:"
+              (:id question) " &apos;)\"")))
+    ;; chip removal drops exactly one token from the set
+    (is (str/includes?
+         body
+         (str "$graphFilter = (&apos; &apos;+$graphFilter+&apos; &apos;).replace(&apos; context:"
+              (:id question) " &apos;, &apos; &apos;).trim()")))
+    root))
 
 (deftest current-work-is-exposed-for-model-facing-reads
   (let [root (builder/record! {:kind :know :body "Root context"
@@ -140,8 +161,9 @@
     (let [body (:body (builder/app {:request-method :get :uri "/"}))]
       (is (str/includes? body "Current work"))
       (is (str/includes? body "$graphFilter = &apos;current-work&apos;"))
-      ;; frontier item and its ancestry match the lens; closed history does not
-      (is (= 2 (count (re-seq #"includes\(&apos; current-work &apos;\)" body)))))))
+      ;; two card visibility clauses (frontier item + ancestry) plus one chip;
+      ;; closed history matches nothing
+      (is (= 3 (count (re-seq #"includes\(&apos; current-work &apos;\)" body)))))))
 
 (deftest lineage-lines-expand-the-visible-context
   (let [root (builder/record! {:kind :know :body "Shared parent"})
@@ -157,9 +179,11 @@
       (is (str/includes? body (str "<button class=\"from-line\"")))
       (is (str/includes? body (str "<button class=\"resolve-line\"")))
       (is (str/includes? body (str "<button class=\"resolved-by-line\"")))
+      ;; expansion is idempotent: a membership guard precedes the append
       (is (str/includes?
            body
-           (str "$graphFilter = ($graphFilter ? $graphFilter + &apos; &apos; : &apos;&apos;) + &apos;context:"
+           (str "includes(&apos; context:" (:id question)
+                " &apos;) || ($graphFilter = ($graphFilter ? $graphFilter + &apos; &apos; : &apos;&apos;) + &apos;context:"
                 (:id question))))
       ;; visibility clauses test membership in the token set, so lenses combine
       (is (str/includes?
@@ -230,7 +254,8 @@
     (is (str/includes? body "class=\"status context-filter\""))
     (is (str/includes? body "Show this item in its graph context"))
     (is (str/includes? body "data-chain=\"true\""))
-    (is (= 3 (count (re-seq (re-pattern (java.util.regex.Pattern/quote context-filter))
+    ;; three card visibility clauses (focus, ancestor, child) plus one chip
+    (is (= 4 (count (re-seq (re-pattern (java.util.regex.Pattern/quote context-filter))
                             body))))
     (is (not (str/includes?
               (first (filter #(str/includes? % (signal-id "bodyDraft" (:id unrelated)))

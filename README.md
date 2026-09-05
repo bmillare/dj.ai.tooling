@@ -309,9 +309,17 @@ filters to only the events after it, entirely client-side.
 Lenses combine: the graph filter holds a set of tokens, and every
 `from` / `resolves` / `answered by` / `standing under` line on a card is a
 click target that adds that connection's context to the current view instead
-of replacing it. Following a resolution into a join like `K26` and then
-clicking its two `from` lines expands the visible context to both parents;
-`Show all` clears the accumulated set.
+of replacing it (idempotently — re-clicking never duplicates a token).
+Following a resolution into a join like `K26` and then clicking its two
+`from` lines expands the visible context to both parents.
+
+The filter bar renders the active set as chips, one per lens, labeled by
+canonical alias (`context: K26`, `resolved: Q7`, `current work`). Clicking a
+chip removes just that lens, so a view can be contracted as incrementally as
+it was grown; `Show all` still clears the whole set. Chips follow the dj.web
+posture: the server renders a chip for every possible lens and the
+client-side token set only toggles visibility — no client JS beyond Datastar
+expressions, no view state on the server.
 
 The display groups each root with its complete spawn subtree even when a child
 is captured after a later root. Every card leads with its canonical alias

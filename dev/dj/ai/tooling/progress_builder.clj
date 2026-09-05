@@ -286,24 +286,42 @@
         (concat (map :id (progress/ancestors graph focus-id))
                 (map :id (progress/children graph focus-id)))))
 
-(defn- filter-clause
-  "Token membership in the space-separated $graphFilter set, so lenses can be
-  combined: clicking a connection adds its context token instead of replacing
-  the current one."
-  [token]
-  (str " || (' '+$graphFilter+' ').includes(' " token " ')"))
+;; The graph filter is one client-side signal holding a space-separated SET of
+;; lens tokens (per dj.web guidance: signals carry only ephemeral view state;
+;; the server renders every possible lens and tokens merely toggle visibility).
+;; The four expressions below are the whole client-side vocabulary.
 
-(defn- expand-filter-action
-  "Click expression that adds one filter token to the active set."
+(defn- token-test
+  "JS: is this token in the active filter set?"
   [token]
-  (str "$graphFilter = ($graphFilter ? $graphFilter + ' ' : '') + '" token "'"))
+  (str "(' '+$graphFilter+' ').includes(' " token " ')"))
 
-(defn- filter-expression [graph node frontier contexts current-work-ids]
-  (let [node-id (:id node)
-        question-ids (set (map :id (:to-knows frontier)))
-        action-ids (set (map :id (:to-dos frontier)))
-        synthesis-ids (set (map :id (:unsynthesized-dones frontier)))
-        resolution-targets (set (mapcat :resolves (ordered-nodes graph)))]
+(defn- filter-clause [token]
+  (str " || " (token-test token)))
+
+(defn- set-filter-action
+  "Click expression that replaces the filter set: entry-point lenses (frontier
+  groups, status buttons, Current work) seed a fresh view."
+  [token]
+  (str "$graphFilter = '" token "'"))
+
+(defn- add-filter-action
+  "Click expression that adds one token to the set, idempotently: expansion
+  gestures (lineage lines) grow the view instead of replacing it."
+  [token]
+  (str (token-test token)
+       " || ($graphFilter = ($graphFilter ? $graphFilter + ' ' : '') + '"
+       token "')"))
+
+(defn- remove-filter-action
+  "Click expression that drops one token from the set: chip removal."
+  [token]
+  (str "$graphFilter = (' '+$graphFilter+' ').replace(' " token " ', ' ').trim()"))
+
+(defn- filter-expression
+  [{:keys [question-ids action-ids synthesis-ids current-work-ids
+           resolution-targets contexts]} node]
+  (let [node-id (:id node)]
     (str "$graphFilter == ''"
          (when (question-ids node-id) (filter-clause "questions"))
          (when (action-ids node-id) (filter-clause "actions"))
@@ -319,8 +337,7 @@
                       :when (context-ids node-id)]
                   (filter-clause (str "context:" focus-id)))))))
 
-(defn- node-card [{:keys [graph frontier contexts current-work-ids alias-of]}
-                  node section-start? previous-id]
+(defn- node-card [{:keys [graph alias-of] :as env} node section-start? previous-id]
   (let [node-id (:id node)
         distant-parents (remove #{previous-id} (:spawned-by node))
         draft (signal-name "draft" node-id)
@@ -342,8 +359,7 @@
                                            (not (#{:branch :last-branch}
                                                  (peek (:gutter node)))))
                                   "true")
-                    :data-show (filter-expression graph node frontier contexts
-                                                  current-work-ids)}
+                    :data-show (filter-expression env node)}
      [:div.rails
       (for [cell (:gutter node)]
         [:span.rail {:data-cell (name cell)}])]
@@ -369,13 +385,13 @@
               [:button.status.resolution-filter
                {:type "button" :data-status (name (:status node))
                 :title "Show this item with the outcome that resolved it"
-                :data-on:click__stop (str "$graphFilter = 'resolution:" node-id "'")}
+                :data-on:click__stop (set-filter-action (str "resolution:" node-id))}
                (lifecycle-label graph node)]
               (if (#{:open :blocked} (:status node))
                 [:button.status.context-filter
                  {:type "button" :data-status (name (:status node))
                   :title "Show this item in its graph context"
-                  :data-on:click__stop (str "$graphFilter = 'context:" node-id "'")}
+                  :data-on:click__stop (set-filter-action (str "context:" node-id))}
                  (lifecycle-label graph node)]
                 [:span.status {:data-status (name (:status node))}
                  (lifecycle-label graph node)]))))
@@ -393,14 +409,14 @@
          (for [parent-id distant-parents]
            [:button.from-line
             {:type "button" :title "Add this parent's context to the view"
-             :data-on:click__stop (expand-filter-action (str "context:" parent-id))}
+             :data-on:click__stop (add-filter-action (str "context:" parent-id))}
             [:span "from"] (aliased-body graph alias-of parent-id)])])
       (when (seq (:resolves node))
         [:div.lineage
          (for [target-id (:resolves node)]
            [:button.resolve-line
             {:type "button" :title "Add the resolved item's context to the view"
-             :data-on:click__stop (expand-filter-action (str "context:" target-id))}
+             :data-on:click__stop (add-filter-action (str "context:" target-id))}
             [:span "resolves"]
             (aliased-body graph alias-of target-id)])])
       (when-let [resolvers (seq (progress/resolved-by graph node-id))]
@@ -408,14 +424,14 @@
          (for [resolver resolvers]
            [:button.resolved-by-line
             {:type "button" :title "Add the resolver's context to the view"
-             :data-on:click__stop (expand-filter-action
+             :data-on:click__stop (add-filter-action
                                    (str "context:" (:id resolver)))}
             [:span (if (= :to-know (:kind node)) "answered by" "completed by")]
             (aliased-body graph alias-of (:id resolver))])])
       (when-let [pinned-under (:pinned-under node)]
         [:button.pin-line
          {:type "button" :title "Add the standing node's context to the view"
-          :data-on:click__stop (expand-filter-action (str "context:" pinned-under))}
+          :data-on:click__stop (add-filter-action (str "context:" pinned-under))}
          "standing under " (aliased-body graph alias-of pinned-under)])
       (when (progress/synthesis-pending? graph node-id)
         [:div.synthesis-badge "Awaiting synthesis"])]
@@ -499,14 +515,14 @@
 (defn- frontier-group [alias-of filter-value label nodes]
   [:section.frontier-group
    [:button.frontier-heading
-    {:type "button" :data-on:click (str "$graphFilter = '" filter-value "'")}
+    {:type "button" :data-on:click (set-filter-action filter-value)}
     [:strong (count nodes)] [:span label]]
    (if (seq nodes)
      [:ol.frontier-items
       (for [node nodes]
         [:li [:button {:type "button"
                        :title "Show this item in its graph context"
-                       :data-on:click (str "$graphFilter = 'context:" (:id node) "'")}
+                       :data-on:click (set-filter-action (str "context:" (:id node)))}
               (str (alias-of (:id node)) " · " (:body node))]])]
      [:p.frontier-empty "None"])])
 
@@ -530,6 +546,36 @@
                 [(str (:alias node) " · " (:body node))]
                 (map #(aliased-body graph alias-of %) node-ids)))]
    (when author [:span.byline (str "~" (progress/author-label author))])])
+
+(def ^:private base-filter-chips
+  [{:token "questions" :label "questions"}
+   {:token "actions" :label "actions"}
+   {:token "synthesis" :label "synthesis"}
+   {:token "current-work" :label "current work"}])
+
+(defn- filter-chips
+  "One chip per active lens token, each individually removable, so the view
+  can be grown and shrunk incrementally instead of only reset. Every possible
+  chip is server-rendered and its token merely toggles visibility, keeping the
+  client dumb per dj.web guidance."
+  [{:keys [graph alias-of resolution-targets]}]
+  (let [chips (concat base-filter-chips
+                      (for [target-id resolution-targets]
+                        {:token (str "resolution:" target-id)
+                         :label (str "resolved: " (alias-of target-id))})
+                      (for [node-id (:order graph)]
+                        {:token (str "context:" node-id)
+                         :label (str "context: " (alias-of node-id))}))]
+    [:div.filter-bar {:data-show "$graphFilter != ''"}
+     [:div.filter-chips
+      [:span.filter-chips-label "Showing"]
+      (for [{:keys [token label]} chips]
+        [:button.chip {:type "button"
+                       :title "Remove this lens from the view"
+                       :data-show (token-test token)
+                       :data-on:click (remove-filter-action token)}
+         label [:span.chip-x "×"]])]
+     [:button {:type "button" :data-on:click "$graphFilter = ''"} "Show all"]]))
 
 (defn- changes-panel
   "Browser lens over changes-since. The bookmark cursor is what a reconnecting
@@ -557,8 +603,11 @@
                        nodes)
         roots (set (:roots topology))
         alias-of (:id->alias (progress/aliases graph))
-        env {:graph graph :frontier frontier :contexts contexts
-             :alias-of alias-of
+        env {:graph graph :contexts contexts :alias-of alias-of
+             :question-ids (set (map :id (:to-knows frontier)))
+             :action-ids (set (map :id (:to-dos frontier)))
+             :synthesis-ids (set (map :id (:unsynthesized-dones frontier)))
+             :resolution-targets (into #{} (mapcat :resolves) (:nodes topology))
              :current-work-ids
              (set (map :id (:nodes (progress/current-work graph))))}]
     [:main#app {:data-signals__ifmissing "{creatingRoot: false, showingModelView: false, showingChanges: false, changesCursor: '', graphFilter: ''}"}
@@ -578,7 +627,7 @@
         [:span (str (count nodes) (if (= 1 (count nodes)) " node" " nodes"))]
         [:button.mode-switch {:type "button"
                               :title "Show only the live frontier and its explanatory ancestry"
-                              :data-on:click "$graphFilter = 'current-work'"}
+                              :data-on:click (set-filter-action "current-work")}
          "Current work"]
         [:button.mode-switch {:type "button"
                               :data-on:click "$showingChanges = !$showingChanges"}
@@ -595,9 +644,7 @@
         [:button {:type "button" :data-on:click "$showingModelView = false"} "Close"]]
        [:pre (view)]]
       (changes-panel graph alias-of)
-      [:div.filter-bar {:data-show "$graphFilter != ''"}
-       [:span "Showing focused graph context"]
-       [:button {:type "button" :data-on:click "$graphFilter = ''"} "Show all"]]
+      (filter-chips env)
       (if (seq nodes)
         [:div.node-list
          (map-indexed
@@ -687,6 +734,11 @@
   .change-cursor { color: #8ab4f8; } .change-op { color: #dbb167; text-transform: uppercase; font-size: .68rem; letter-spacing: .06em; }
   .change-refs { overflow-wrap: anywhere; }
   .filter-bar { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: .65rem; padding: .55rem .7rem; border: 1px solid #464c5c; border-radius: .55rem; background: #181b22; color: #b6b9bf; font-size: .76rem; }
+  .filter-chips { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem; min-width: 0; }
+  .filter-chips-label { color: #75787f; margin-right: .2rem; }
+  .chip { display: inline-flex; align-items: center; gap: .35rem; border: 1px solid #464c5c; background: #212329; border-radius: 999px; padding: .18rem .6rem; font-size: .72rem; color: #caccd1; }
+  .chip:hover { border-color: #e6a1a1; color: #fff; }
+  .chip-x { color: #75787f; font-weight: 800; } .chip:hover .chip-x { color: #e6a1a1; }
   .join { margin-top: .65rem; color: #a6a8ae; font-size: .75rem; } .join .field { margin-top: .5rem; }
   .complete-editor { display: grid; grid-template-columns: 1fr auto; gap: .45rem; margin-top: .7rem; } .complete-editor input { min-width: 0; }
   .resolve-existing { border-top: 1px solid #2b2d33; margin-top: .7rem; padding-top: .6rem; } .resolve-row { display: grid; grid-template-columns: 1fr auto; gap: .45rem; } .resolve-row select { min-width: 0; }
