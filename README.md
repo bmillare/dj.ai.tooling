@@ -297,6 +297,12 @@ root capture form; there is no global editing mode. `LLM view` shows the exact
 compact text returned by `progress-builder/view` so a human can inspect the
 model-facing projection.
 
+The display groups each root with its complete spawn subtree even when a child
+is captured after a later root. Numbered root sections and extra spacing mark
+the major runs; linear chains stay flush, and indentation appears only where a
+parent forks. Since this full view includes every parent, it omits redundant
+`from` lines (a bounded future view may restore them at clipped boundaries).
+
 Agenda closure is outcome-driven in this UI: a Know answers a To Know, while a
 Done completes a To Do. Spawn edges can connect any number of activities to an
 inquiry without closing it. The generic library status API still supports

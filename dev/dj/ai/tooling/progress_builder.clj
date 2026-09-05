@@ -115,7 +115,7 @@
 (defn- short-body [graph node-id]
   (some-> (progress/node graph node-id) :body))
 
-(defn- node-card [graph node depth]
+(defn- node-card [graph node depth section-number]
   (let [node-id (:id node)
         draft (signal-name "draft" node-id)
         also-from (signal-name "alsoFrom" node-id)
@@ -126,6 +126,7 @@
         editing (signal-name "editing" node-id)
         nodes (remove #(= node-id (:id %)) (ordered-nodes graph))]
     [:article.node-card {:data-kind (name (:kind node))
+                         :data-section-start (boolean section-number)
                          :style (str "--depth:" depth)
                          :data-signals__ifmissing
                          (str "{" draft ": '', " also-from ": '', "
@@ -134,15 +135,13 @@
      [:div.node-content {:data-on:click (str "$" editing " = true")
                          :title "Click to edit this node"}
       [:header
-       [:span.kind (get kind-labels (:kind node))]
+       [:div.node-heading
+        (when section-number [:span.sequence-number section-number])
+        [:span.kind (get kind-labels (:kind node))]]
        (when (progress/agenda? node)
          [:span.status {:data-status (name (:status node))}
           (lifecycle-label graph node)])]
       [:p.body (:body node)]
-      (when (seq (:spawned-by node))
-        [:div.lineage
-         (for [parent-id (:spawned-by node)]
-           [:div.spawn-line [:span "from"] (short-body graph parent-id)])])
       (when (seq (:resolves node))
         [:div.lineage
          (for [target-id (:resolves node)]
@@ -199,15 +198,6 @@
                                          "&status=" (name status) "')")}
             (get status-labels status)])])]]))
 
-(defn- node-depths [graph]
-  (reduce (fn [depths node-id]
-            (let [parents (:spawned-by (progress/node graph node-id))]
-              (assoc depths node-id
-                     (if (seq parents)
-                       (inc (apply max (map depths parents)))
-                       0))))
-          {} (:order graph)))
-
 (defn- synthesis-inbox [graph]
   (when-let [dones (seq (progress/unsynthesized-dones graph))]
     [:section.inbox
@@ -229,8 +219,10 @@
 
 (defn main-view []
   (let [{:keys [graph notice]} @state
-        nodes (ordered-nodes graph)
-        depths (node-depths graph)]
+        topology (progress/topology graph)
+        nodes (progress/topology-layout topology)
+        roots (set (:roots topology))
+        section-numbers (zipmap (:roots topology) (map inc (range)))]
     [:main#app {:data-signals__ifmissing "{creatingRoot: false, showingModelView: false}"}
      [:section.hero
       [:p.eyebrow "dj.ai.tooling / dev"]
@@ -258,7 +250,10 @@
         [:button {:type "button" :data-on:click "$showingModelView = false"} "Close"]]
        [:pre (view)]]
       (if (seq nodes)
-        [:div.node-list (map #(node-card graph % (depths (:id %))) nodes)]
+        [:div.node-list
+         (map #(node-card graph % (:display-depth %)
+                          (when (roots (:id %)) (section-numbers (:id %))))
+              nodes)]
         [:div.empty-state "The graph is empty. Add a root to begin."])]]))
 
 (def ^:private styles
@@ -290,6 +285,8 @@
   .graph, .inbox { margin-top: 2.5rem; } .section-heading { margin-bottom: 1rem; color: #a8b4aa; } .section-heading h2 { color: #e9eee9; }
   .heading-actions { display: flex; align-items: center; gap: .7rem; } .mode-switch { min-width: 4rem; }
   .node-list { display: grid; gap: 1rem; align-items: start; padding: .5rem; } .node-card { position: relative; width: min(48rem, calc(100% - var(--depth) * 2rem)); margin-left: calc(var(--depth) * 2rem); background: #171c18; border: 1px solid #2c352e; border-left: .3rem solid #778079; border-radius: .75rem; padding: 1rem; }
+  .node-card[data-section-start=true] { margin-top: 1.65rem; } .node-card:first-child { margin-top: 0; }
+  .node-heading { display: flex; align-items: center; gap: .5rem; } .sequence-number { display: inline-grid; place-items: center; min-width: 1.45rem; height: 1.45rem; padding: 0 .35rem; border-radius: 999px; background: #29352d; color: #c8d4ca; font-size: .7rem; font-weight: 800; }
   .node-card[style*=\"--depth:0\"] { width: min(48rem, 100%); }
   .node-card:not([style*=\"--depth:0\"]):before { content: ''; position: absolute; left: -2.3rem; top: -1.05rem; width: 2rem; height: 2rem; border-left: 2px solid #526259; border-bottom: 2px solid #526259; border-radius: 0 0 0 .45rem; }
   .node-card[data-kind=know] { border-left-color: #8fdda9; } .node-card[data-kind=done] { border-left-color: #6eafdf; } .node-card[data-kind=to-know] { border-left-color: #dbb167; } .node-card[data-kind=to-do] { border-left-color: #d77c7c; }
@@ -297,8 +294,8 @@
   .status[data-status=blocked], .status[data-status=cancelled] { color: #e6a1a1; } .body { font-size: 1.05rem; margin: .8rem 0 .45rem; white-space: pre-wrap; }
   .id { display: block; color: #718078; font-size: .68rem; overflow-wrap: anywhere; margin: .55rem 0; }
   .edges { color: #a8b4aa; font-size: .75rem; margin-top: .25rem; } .edges span { color: #718078; margin-right: .45rem; }
-  .lineage { margin: .5rem 0; display: grid; gap: .25rem; } .spawn-line, .resolve-line { position: relative; color: #a8b4aa; font-size: .72rem; padding-left: 1rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .spawn-line:before, .resolve-line:before, .resolved-by-line:before { content: ''; position: absolute; left: 0; top: .55em; width: .7rem; border-top: 2px solid #8fdda9; } .resolve-line:before, .resolved-by-line:before { border-top-style: dashed; border-color: #6eafdf; } .spawn-line span, .resolve-line span, .resolved-by-line span { color: #718078; margin-right: .35rem; }
+  .lineage { margin: .5rem 0; display: grid; gap: .25rem; } .resolve-line { position: relative; color: #a8b4aa; font-size: .72rem; padding-left: 1rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .resolve-line:before, .resolved-by-line:before { content: ''; position: absolute; left: 0; top: .55em; width: .7rem; border-top: 2px dashed #6eafdf; } .resolve-line span, .resolved-by-line span { color: #718078; margin-right: .35rem; }
   .resolved-by-line { position: relative; color: #a8b4aa; font-size: .72rem; padding-left: 1rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .pin-line, .synthesis-badge { color: #8fdda9; font-size: .72rem; margin: .4rem 0; } .synthesis-badge { color: #dbb167; }
   .inspector { color: #718078; font-size: .72rem; margin: .5rem 0; } .inspector summary, .join summary { cursor: pointer; }

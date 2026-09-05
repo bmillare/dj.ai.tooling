@@ -269,11 +269,25 @@
         rendered (progress/render-topology (progress/topology graph))]
     (is (= (str "FRONTIER | questions: Q1 | actions: none | synthesis: D1\n\n"
                 "[Q1] TO KNOW: What changed?\n"
-                "  [A1] TO DO: Run the check | COMPLETED\n"
-                "    [D1] DONE: The check passed | resolves A1")
+                "[A1] TO DO: Run the check | COMPLETED\n"
+                "[D1] DONE: The check passed | resolves A1")
            rendered))
     (is (not (str/includes? rendered "created-at")))
     (is (not (str/includes? rendered (str #inst "2026-09-04"))))))
+
+(deftest topology-layout-groups-late-children-and-indents-only-forks
+  (let [graph (-> (progress/empty-graph)
+                  (add :root-a :done "First root" [] 0)
+                  (add :root-b :done "Second root" [] 1)
+                  (add :child-a :know "Late child" [:root-a] 2)
+                  (add :fork-a :to-know "Fork A" [:child-a] 3)
+                  (add :fork-b :to-do "Fork B" [:child-a] 4)
+                  (add :linear :done "Linear under branch" [:fork-a] 5))
+        layout (progress/topology-layout (progress/topology graph))]
+    (is (= [:root-a :child-a :fork-a :linear :fork-b :root-b]
+           (mapv :id layout)))
+    (is (= [0 0 1 1 1 0]
+           (mapv :display-depth layout)))))
 
 (deftest updates-preserve-existing-data
   (let [graph (-> (progress/empty-graph)

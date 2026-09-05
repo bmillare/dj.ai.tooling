@@ -336,13 +336,29 @@
            {:counts {} :aliases {}}
            nodes)))
 
-(defn- topology-depths [nodes]
-  (reduce (fn [depths {:keys [id spawned-by]}]
-            (assoc depths id
-                   (if (seq spawned-by)
-                     (inc (apply max (map #(get depths % 0) spawned-by)))
-                     0)))
-          {} nodes))
+(defn topology-layout
+  "Returns nodes in a stable, parent-grouped display order with indentation
+  lanes only where a parent forks. A joined node is emitted once, beneath the
+  first parent reached by the root-ordered depth-first walk."
+  [{:keys [roots nodes]}]
+  (let [by-id (into {} (map (juxt :id identity)) nodes)
+        walk (fn walk [result seen node-id depth]
+               (if (contains? seen node-id)
+                 [result seen]
+                 (let [node (by-id node-id)
+                       children (:spawn-children node)
+                       child-depth (+ depth (if (> (count children) 1) 1 0))]
+                   (reduce (fn [[result seen] child-id]
+                             (walk result seen child-id child-depth))
+                           [(conj result (assoc node :display-depth depth))
+                            (conj seen node-id)]
+                           children))))
+        starts (concat roots (map :id nodes))]
+    (first
+     (reduce (fn [[result seen] node-id]
+               (walk result seen node-id 0))
+             [[] #{}]
+             starts))))
 
 (defn- alias-list [aliases ids]
   (str/join ", " (sort (keep aliases ids))))
@@ -353,18 +369,18 @@
   Stable UUIDs, timestamps, empty fields, and repeated frontier bodies are
   omitted. Short per-kind aliases retain enough identity to express joins,
   resolutions, state, and the current frontier."
-  [{:keys [nodes frontier]}]
+  [{:keys [nodes frontier] :as topology}]
   (let [aliases (topology-aliases nodes)
-        depths (topology-depths nodes)
+        display-nodes (topology-layout topology)
         frontier-ids (fn [key] (map :id (get frontier key)))
         summary (str "FRONTIER"
                      " | questions: " (or (not-empty (alias-list aliases (frontier-ids :to-knows))) "none")
                      " | actions: " (or (not-empty (alias-list aliases (frontier-ids :to-dos))) "none")
                      " | synthesis: " (or (not-empty (alias-list aliases (frontier-ids :unsynthesized-dones))) "none"))
         render-node
-        (fn [{:keys [id kind body status spawned-by resolves resolved-by pinned-under artifacts]}]
+        (fn [{:keys [id kind body status spawned-by resolves resolved-by pinned-under artifacts display-depth]}]
           (let [[_ label] (render-kind kind)
-                indent (str/join (repeat (* 2 (depths id)) " "))
+                indent (str/join (repeat (* 2 display-depth) " "))
                 body (str/replace body "\n" (str "\n" indent "  "))
                 joins (when (> (count spawned-by) 1)
                         (str " | from " (alias-list aliases spawned-by)))
@@ -382,7 +398,7 @@
                  joins resolution state pin refs)))]
     (str summary
          (when (seq nodes) "\n\n")
-         (str/join "\n" (map render-node nodes)))))
+         (str/join "\n" (map render-node display-nodes)))))
 
 (defn candidates
   "Returns selectable open To Knows and To Dos in capture order."
