@@ -2,8 +2,8 @@
   "Pure construction and query primitives for progress graphs.
 
   Spawn edges preserve why a node exists; resolution edges record an explicit
-  outcome. Persistence, clocks, identifiers, ranking, and rendering are left
-  to callers."
+  outcome. Persistence, clocks, identifiers, and ranking are left to callers;
+  a compact topology renderer is provided for model-facing inspection."
   (:refer-clojure :exclude [ancestors resolve])
   (:require [clojure.string :as str]))
 
@@ -319,6 +319,67 @@
                            (mapv :id (resolved-by graph node-id)))))
                 (:order graph))
    :frontier (frontier graph)})
+
+(def ^:private render-kind
+  {:done ["D" "DONE"]
+   :know ["K" "KNOW"]
+   :to-know ["Q" "TO KNOW"]
+   :to-do ["A" "TO DO"]})
+
+(defn- topology-aliases [nodes]
+  (:aliases
+   (reduce (fn [{:keys [counts aliases]} node]
+             (let [prefix (first (render-kind (:kind node)))
+                   number (inc (get counts prefix 0))]
+               {:counts (assoc counts prefix number)
+                :aliases (assoc aliases (:id node) (str prefix number))}))
+           {:counts {} :aliases {}}
+           nodes)))
+
+(defn- topology-depths [nodes]
+  (reduce (fn [depths {:keys [id spawned-by]}]
+            (assoc depths id
+                   (if (seq spawned-by)
+                     (inc (apply max (map #(get depths % 0) spawned-by)))
+                     0)))
+          {} nodes))
+
+(defn- alias-list [aliases ids]
+  (str/join ", " (sort (keep aliases ids))))
+
+(defn render-topology
+  "Renders a topology projection as dense model-facing text.
+
+  Stable UUIDs, timestamps, empty fields, and repeated frontier bodies are
+  omitted. Short per-kind aliases retain enough identity to express joins,
+  resolutions, state, and the current frontier."
+  [{:keys [nodes frontier]}]
+  (let [aliases (topology-aliases nodes)
+        depths (topology-depths nodes)
+        frontier-ids (fn [key] (map :id (get frontier key)))
+        summary (str "FRONTIER"
+                     " | questions: " (or (not-empty (alias-list aliases (frontier-ids :to-knows))) "none")
+                     " | actions: " (or (not-empty (alias-list aliases (frontier-ids :to-dos))) "none")
+                     " | synthesis: " (or (not-empty (alias-list aliases (frontier-ids :unsynthesized-dones))) "none"))
+        render-node
+        (fn [{:keys [id kind body status spawned-by resolves pinned-under artifacts]}]
+          (let [[_ label] (render-kind kind)
+                indent (str/join (repeat (* 2 (depths id)) " "))
+                body (str/replace body "\n" (str "\n" indent "  "))
+                joins (when (> (count spawned-by) 1)
+                        (str " | from " (alias-list aliases spawned-by)))
+                resolution (when (seq resolves)
+                             (str " | resolves " (alias-list aliases resolves)))
+                state (when (and (agenda? {:kind kind}) (not= :open status))
+                        (str " | " (str/upper-case (name status))))
+                pin (when pinned-under (str " | pinned under " (aliases pinned-under)))
+                refs (when (seq artifacts)
+                       (str " | refs " (str/join ", " (map :ref artifacts))))]
+            (str indent "[" (aliases id) "] " label ": " body
+                 joins resolution state pin refs)))]
+    (str summary
+         (when (seq nodes) "\n\n")
+         (str/join "\n" (map render-node nodes)))))
 
 (defn candidates
   "Returns selectable open To Knows and To Dos in capture order."

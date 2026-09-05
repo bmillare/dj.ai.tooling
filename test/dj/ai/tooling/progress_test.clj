@@ -1,5 +1,6 @@
 (ns dj.ai.tooling.progress-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest is]]
             [dj.ai.tooling.progress :as progress]))
 
 (defn- add [graph id kind body parents n]
@@ -258,6 +259,21 @@
     (is (= [:learned] (:resolved-by (by-id :question-a))))
     (is (= [:done-b]
            (mapv :id (get-in view [:frontier :unsynthesized-dones]))))))
+
+(deftest topology-render-is-dense-readable-and-relational
+  (let [graph (-> (progress/empty-graph)
+                  (add :q :to-know "What changed?" [] 0)
+                  (add :a :to-do "Run the check" [:q] 1)
+                  (add :d :done "The check passed" [:a] 2)
+                  (progress/resolve :d [:a]))
+        rendered (progress/render-topology (progress/topology graph))]
+    (is (= (str "FRONTIER | questions: Q1 | actions: none | synthesis: D1\n\n"
+                "[Q1] TO KNOW: What changed?\n"
+                "  [A1] TO DO: Run the check | CLOSED\n"
+                "    [D1] DONE: The check passed | resolves A1")
+           rendered))
+    (is (not (str/includes? rendered "created-at")))
+    (is (not (str/includes? rendered (str #inst "2026-09-04"))))))
 
 (deftest updates-preserve-existing-data
   (let [graph (-> (progress/empty-graph)

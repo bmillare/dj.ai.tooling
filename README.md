@@ -290,15 +290,20 @@ The pure `progress/topology` query projects capture-ordered nodes with direct
 `:spawn-children` and `:resolved-by` edges, plus roots and the derived frontier.
 Restarting the process clears the graph.
 
-The topology opens in a condensed Read mode that retains node content and
-relationships while hiding capture and workflow controls. Use the Read/Edit
-switch beside the node count to expose the full authoring surface.
+The topology is always rendered in its condensed form. Click a node's content
+to expose authoring and workflow controls for only that node, then close it to
+return the card to its dense form. `New node` beside the node count reveals the
+root capture form; there is no global editing mode.
 
 The builder also starts an nREPL server bound to localhost on an ephemeral
 port and writes that port to `.nrepl-port`. This is the preferred live agent
-seam: call `dj.ai.tooling.progress-builder/topology` to read the semantic graph
-and `dj.ai.tooling.progress-builder/record!` to add nodes without accessing the
-backing atom. The state atom and subscription registry are `defonce`,
+seam: call `dj.ai.tooling.progress-builder/topology` for structured graph data,
+`dj.ai.tooling.progress-builder/view` for dense model-facing text, and
+`dj.ai.tooling.progress-builder/record!` to add nodes without accessing the
+backing atom. `view` omits UUIDs, timestamps, empty fields, and repeated frontier
+bodies while retaining short aliases, topology, joins, resolutions, lifecycle
+state, pins, and artifact references. The state atom and subscription registry
+are `defonce`,
 so reloading the builder namespace preserves the live graph. For example, with `clj-nrepl-eval` from
 `clojure-mcp-light` installed:
 

@@ -46,14 +46,23 @@
     (is (str/includes? body "data-bind=\"rootBody\""))
     (is (str/includes? body "@post(&apos;/add-root?kind=know&apos;)"))))
 
-(deftest topology-defaults-to-condensed-read-mode
+(deftest topology-is-dense-with-root-and-node-local-editing
   (add-root "know" "Content remains prominent")
   (let [body (:body (builder/app {:request-method :get :uri "/"}))]
-    (is (str/includes? body "data-signals__ifmissing=\"{readMode: true}\""))
-    (is (str/includes? body "data-class:read-mode=\"$readMode\""))
-    (is (str/includes? body "data-show=\"!$readMode\""))
-    (is (str/includes? body "data-on:click=\"$readMode = false\""))
+    (is (str/includes? body "data-signals__ifmissing=\"{creatingRoot: false}\""))
+    (is (str/includes? body "data-show=\"$creatingRoot\""))
+    (is (str/includes? body "$editing_"))
+    (is (str/includes? body "New node"))
+    (is (not (str/includes? body "readMode")))
     (is (str/includes? body "Content remains prominent"))))
+
+(deftest repl-view-renders-content-without-record-mechanics
+  (builder/record! {:kind :to-know :body "What matters?"})
+  (let [rendered (builder/view)]
+    (is (str/includes? rendered "FRONTIER | questions: Q1"))
+    (is (str/includes? rendered "[Q1] TO KNOW: What matters?"))
+    (is (not (str/includes? rendered "created-at")))
+    (is (not (str/includes? rendered "spawned-by")))))
 
 (deftest node-local-capture-supports-joins-and-topology
   (is (= 204 (:status (add-root "to-know" "What matters?"))))

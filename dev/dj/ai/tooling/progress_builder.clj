@@ -27,6 +27,11 @@
   []
   (progress/topology (:graph @state)))
 
+(defn view
+  "Returns a compact, model-facing text view of the live graph."
+  []
+  (progress/render-topology (topology)))
+
 (defn record!
   "Records a node in the live graph and returns its topology projection.
   Generates process concerns (id and timestamp) when callers omit them."
@@ -89,8 +94,11 @@
      [:div.kind-actions
       (for [kind [:done :know :to-know :to-do]]
         [:button {:type "button" :data-kind (name kind)
-                  :data-on:click (str "@post('/add-root?kind=" (name kind) "')")}
-         (get kind-labels kind)])]]))
+                  :data-on:click (str "@post('/add-root?kind=" (name kind)
+                                      "'); $creatingRoot = false")}
+         (get kind-labels kind)])
+      [:button {:type "button" :data-on:click "$creatingRoot = false"}
+       "Cancel"]]]))
 
 (defn- edge-list [label ids]
   (when (seq ids)
@@ -110,32 +118,39 @@
         artifact (signal-name "artifact" node-id)
         standing (signal-name "standing" node-id)
         done-note (signal-name "doneNote" node-id)
+        editing (signal-name "editing" node-id)
         nodes (remove #(= node-id (:id %)) (ordered-nodes graph))]
     [:article.node-card {:data-kind (name (:kind node))
                          :style (str "--depth:" depth)
                          :data-signals__ifmissing
                          (str "{" draft ": '', " also-from ": '', "
                               resolves ": '', " artifact ": '', " standing
-                              ": false, " done-note ": ''}")}
-     [:header
-      [:span.kind (get kind-labels (:kind node))]
-      (when (progress/agenda? node)
-        [:span.status {:data-status (name (:status node))}
-         (get status-labels (:status node))])]
-     [:p.body (:body node)]
-     (when (seq (:spawned-by node))
-       [:div.lineage
-        (for [parent-id (:spawned-by node)]
-          [:div.spawn-line [:span "from"] (short-body graph parent-id)])])
-     (when (seq (:resolves node))
-       [:div.lineage
-        (for [target-id (:resolves node)]
-          [:div.resolve-line [:span "resolves"] (short-body graph target-id)])])
-     (when-let [pinned-under (:pinned-under node)]
-       [:div.pin-line "standing under " (short-body graph pinned-under)])
-     (when (progress/synthesis-pending? graph node-id)
-       [:div.synthesis-badge "Awaiting synthesis"])
-     [:div.node-controls {:data-show "!$readMode"}
+                              ": false, " done-note ": '', " editing ": false}")}
+     [:div.node-content {:data-on:click (str "$" editing " = true")
+                         :title "Click to edit this node"}
+      [:header
+       [:span.kind (get kind-labels (:kind node))]
+       (when (progress/agenda? node)
+         [:span.status {:data-status (name (:status node))}
+          (get status-labels (:status node))])]
+      [:p.body (:body node)]
+      (when (seq (:spawned-by node))
+        [:div.lineage
+         (for [parent-id (:spawned-by node)]
+           [:div.spawn-line [:span "from"] (short-body graph parent-id)])])
+      (when (seq (:resolves node))
+        [:div.lineage
+         (for [target-id (:resolves node)]
+           [:div.resolve-line [:span "resolves"] (short-body graph target-id)])])
+      (when-let [pinned-under (:pinned-under node)]
+        [:div.pin-line "standing under " (short-body graph pinned-under)])
+      (when (progress/synthesis-pending? graph node-id)
+        [:div.synthesis-badge "Awaiting synthesis"])]
+     [:div.node-controls {:data-show (str "$" editing)}
+      [:div.control-heading
+       [:span "Edit node"]
+       [:button {:type "button" :data-on:click (str "$" editing " = false")}
+        "Close"]]
       [:details.inspector
        [:summary "Inspect"]
        [:code.id node-id]
@@ -205,8 +220,7 @@
   (let [{:keys [graph notice]} @state
         nodes (ordered-nodes graph)
         depths (node-depths graph)]
-    [:main#app {:data-signals__ifmissing "{readMode: true}"
-                :data-class:read-mode "$readMode"}
+    [:main#app {:data-signals__ifmissing "{creatingRoot: false}"}
      [:section.hero
       [:p.eyebrow "dj.ai.tooling / dev"]
       [:h1 "Progress graph builder"]
@@ -214,19 +228,16 @@
      (when notice
        [:aside.notice {:data-level (name (:level notice))} (:message notice)])
      (frontier-summary graph)
-     [:div {:data-show "!$readMode"} (root-form graph)]
-     [:div {:data-show "!$readMode"} (synthesis-inbox graph)]
+     [:div {:data-show "$creatingRoot"} (root-form graph)]
+     (synthesis-inbox graph)
      [:section.graph
       [:div.section-heading
        [:h2 "Topology"]
        [:div.heading-actions
         [:span (str (count nodes) (if (= 1 (count nodes)) " node" " nodes"))]
-        [:button.mode-switch {:type "button" :data-show "$readMode"
-                              :data-on:click "$readMode = false"}
-         "Edit"]
-        [:button.mode-switch {:type "button" :data-show "!$readMode"
-                              :data-on:click "$readMode = true"}
-         "Read"]]]
+        [:button.mode-switch {:type "button"
+                              :data-on:click "$creatingRoot = true"}
+         "New node"]]]
       (if (seq nodes)
         [:div.node-list (map #(node-card graph % (depths (:id %))) nodes)]
         [:div.empty-state "The graph is empty. Add a root to begin."])]]))
@@ -272,12 +283,15 @@
   .pin-line, .synthesis-badge { color: #8fdda9; font-size: .72rem; margin: .4rem 0; } .synthesis-badge { color: #dbb167; }
   .inspector { color: #718078; font-size: .72rem; margin: .5rem 0; } .inspector summary, .join summary { cursor: pointer; }
   .local-editor { border-top: 1px solid #2c352e; padding-top: .75rem; margin-top: .75rem; } .local-editor textarea { background: #f7faf7; min-height: 6rem; }
-  .read-mode { padding-top: 2rem; } .read-mode .hero { margin-bottom: 1rem; } .read-mode .hero h1 { font-size: clamp(2rem, 5vw, 3.4rem); }
-  .read-mode .graph { margin-top: 1.25rem; } .read-mode .node-list { gap: .4rem; padding-top: 0; }
-  .read-mode .node-card { padding: .55rem .75rem; border-radius: .45rem; width: min(60rem, calc(100% - var(--depth) * 1.35rem)); margin-left: calc(var(--depth) * 1.35rem); }
-  .read-mode .node-card[style*=\"--depth:0\"] { width: min(60rem, 100%); }
-  .read-mode .node-card:not([style*=\"--depth:0\"]):before { left: -1.65rem; top: -.45rem; width: 1.35rem; height: 1.1rem; }
-  .read-mode .body { font-size: .95rem; margin: .35rem 0 .2rem; } .read-mode .lineage { margin: .2rem 0; }
+  main { padding-top: 2rem; } .hero { margin-bottom: 1rem; } .hero h1 { font-size: clamp(2rem, 5vw, 3.4rem); }
+  .graph { margin-top: 1.25rem; } .node-list { gap: .4rem; padding-top: 0; }
+  .node-card { padding: .55rem .75rem; border-radius: .45rem; width: min(60rem, calc(100% - var(--depth) * 1.35rem)); margin-left: calc(var(--depth) * 1.35rem); }
+  .node-card[style*=\"--depth:0\"] { width: min(60rem, 100%); }
+  .node-card:not([style*=\"--depth:0\"]):before { left: -1.65rem; top: -.45rem; width: 1.35rem; height: 1.1rem; }
+  .body { font-size: .95rem; margin: .35rem 0 .2rem; } .lineage { margin: .2rem 0; }
+  .node-content { cursor: pointer; } .node-content:hover .body { color: #fff; }
+  .node-controls { border-top: 1px solid #3b463e; margin-top: .65rem; padding-top: .4rem; }
+  .control-heading { display: flex; align-items: center; justify-content: space-between; color: #8fdda9; font-size: .72rem; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; }
   .join { margin-top: .65rem; color: #a8b4aa; font-size: .75rem; } .join .field { margin-top: .5rem; }
   .complete-editor { display: grid; grid-template-columns: 1fr auto; gap: .45rem; margin-top: .7rem; } .complete-editor input { min-width: 0; }
   .inbox-item { display: flex; justify-content: space-between; gap: 1rem; align-items: center; padding: .8rem; border: 1px solid #4b4029; background: #211d15; border-radius: .65rem; margin-bottom: .5rem; }
