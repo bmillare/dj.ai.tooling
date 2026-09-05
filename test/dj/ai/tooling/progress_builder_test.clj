@@ -49,12 +49,25 @@
 (deftest topology-is-dense-with-root-and-node-local-editing
   (add-root "know" "Content remains prominent")
   (let [body (:body (builder/app {:request-method :get :uri "/"}))]
-    (is (str/includes? body "data-signals__ifmissing=\"{creatingRoot: false}\""))
+    (is (str/includes? body "data-signals__ifmissing=\"{creatingRoot: false, showingModelView: false}\""))
     (is (str/includes? body "data-show=\"$creatingRoot\""))
     (is (str/includes? body "$editing_"))
     (is (str/includes? body "New node"))
+    (is (str/includes? body "LLM view"))
+    (is (str/includes? body "Raw LLM rendered view"))
     (is (not (str/includes? body "readMode")))
     (is (str/includes? body "Content remains prominent"))))
+
+(deftest resolved-agenda-shows-outcome-and-does-not-offer-manual-close
+  (let [question (builder/record! {:kind :to-know :body "What matters?"})]
+    (builder/record! {:kind :know :body "Content matters."
+                      :resolves #{(:id question)}})
+    (let [body (:body (builder/app {:request-method :get :uri "/"}))]
+      (is (str/includes? body "Answered"))
+      (is (str/includes? body "ANSWERED"))
+      (is (str/includes? body "answered by"))
+      (is (str/includes? body "Content matters."))
+      (is (not (str/includes? body "&status=closed"))))))
 
 (deftest repl-view-renders-content-without-record-mechanics
   (builder/record! {:kind :to-know :body "What matters?"})

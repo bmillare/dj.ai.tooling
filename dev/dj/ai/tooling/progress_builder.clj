@@ -49,6 +49,11 @@
 (def ^:private status-labels
   {:open "Open" :blocked "Blocked" :closed "Closed" :cancelled "Cancelled"})
 
+(defn- lifecycle-label [graph {:keys [id kind status]}]
+  (if (and (= :closed status) (seq (progress/resolved-by graph id)))
+    (case kind :to-know "Answered" :to-do "Completed" "Closed")
+    (get status-labels status)))
+
 (defn- parse-kind [value]
   (some #(when (= value (name %)) %) progress/node-kinds))
 
@@ -132,7 +137,7 @@
        [:span.kind (get kind-labels (:kind node))]
        (when (progress/agenda? node)
          [:span.status {:data-status (name (:status node))}
-          (get status-labels (:status node))])]
+          (lifecycle-label graph node)])]
       [:p.body (:body node)]
       (when (seq (:spawned-by node))
         [:div.lineage
@@ -142,6 +147,12 @@
         [:div.lineage
          (for [target-id (:resolves node)]
            [:div.resolve-line [:span "resolves"] (short-body graph target-id)])])
+      (when-let [resolvers (seq (progress/resolved-by graph node-id))]
+        [:div.lineage
+         (for [resolver resolvers]
+           [:div.resolved-by-line
+            [:span (if (= :to-know (:kind node)) "answered by" "completed by")]
+            (:body resolver)])])
       (when-let [pinned-under (:pinned-under node)]
         [:div.pin-line "standing under " (short-body graph pinned-under)])
       (when (progress/synthesis-pending? graph node-id)
@@ -181,7 +192,7 @@
           "Record done"]])
       (when (progress/agenda? node)
         [:div.status-actions
-         (for [status [:open :blocked :closed :cancelled]
+         (for [status [:open :blocked :cancelled]
                :when (progress/status-transition? node status)]
            [:button {:type "button"
                      :data-on:click (str "@post('/set-status?node=" node-id
@@ -220,7 +231,7 @@
   (let [{:keys [graph notice]} @state
         nodes (ordered-nodes graph)
         depths (node-depths graph)]
-    [:main#app {:data-signals__ifmissing "{creatingRoot: false}"}
+    [:main#app {:data-signals__ifmissing "{creatingRoot: false, showingModelView: false}"}
      [:section.hero
       [:p.eyebrow "dj.ai.tooling / dev"]
       [:h1 "Progress graph builder"]
@@ -236,8 +247,16 @@
        [:div.heading-actions
         [:span (str (count nodes) (if (= 1 (count nodes)) " node" " nodes"))]
         [:button.mode-switch {:type "button"
+                              :data-on:click "$showingModelView = !$showingModelView"}
+         "LLM view"]
+        [:button.mode-switch {:type "button"
                               :data-on:click "$creatingRoot = true"}
          "New node"]]]
+      [:section.model-view {:data-show "$showingModelView"}
+       [:div.control-heading
+        [:span "Raw LLM rendered view"]
+        [:button {:type "button" :data-on:click "$showingModelView = false"} "Close"]]
+       [:pre (view)]]
       (if (seq nodes)
         [:div.node-list (map #(node-card graph % (depths (:id %))) nodes)]
         [:div.empty-state "The graph is empty. Add a root to begin."])]]))
@@ -279,7 +298,8 @@
   .id { display: block; color: #718078; font-size: .68rem; overflow-wrap: anywhere; margin: .55rem 0; }
   .edges { color: #a8b4aa; font-size: .75rem; margin-top: .25rem; } .edges span { color: #718078; margin-right: .45rem; }
   .lineage { margin: .5rem 0; display: grid; gap: .25rem; } .spawn-line, .resolve-line { position: relative; color: #a8b4aa; font-size: .72rem; padding-left: 1rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .spawn-line:before, .resolve-line:before { content: ''; position: absolute; left: 0; top: .55em; width: .7rem; border-top: 2px solid #8fdda9; } .resolve-line:before { border-top-style: dashed; border-color: #6eafdf; } .spawn-line span, .resolve-line span { color: #718078; margin-right: .35rem; }
+  .spawn-line:before, .resolve-line:before, .resolved-by-line:before { content: ''; position: absolute; left: 0; top: .55em; width: .7rem; border-top: 2px solid #8fdda9; } .resolve-line:before, .resolved-by-line:before { border-top-style: dashed; border-color: #6eafdf; } .spawn-line span, .resolve-line span, .resolved-by-line span { color: #718078; margin-right: .35rem; }
+  .resolved-by-line { position: relative; color: #a8b4aa; font-size: .72rem; padding-left: 1rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .pin-line, .synthesis-badge { color: #8fdda9; font-size: .72rem; margin: .4rem 0; } .synthesis-badge { color: #dbb167; }
   .inspector { color: #718078; font-size: .72rem; margin: .5rem 0; } .inspector summary, .join summary { cursor: pointer; }
   .local-editor { border-top: 1px solid #2c352e; padding-top: .75rem; margin-top: .75rem; } .local-editor textarea { background: #f7faf7; min-height: 6rem; }
@@ -292,6 +312,8 @@
   .node-content { cursor: pointer; } .node-content:hover .body { color: #fff; }
   .node-controls { border-top: 1px solid #3b463e; margin-top: .65rem; padding-top: .4rem; }
   .control-heading { display: flex; align-items: center; justify-content: space-between; color: #8fdda9; font-size: .72rem; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; }
+  .model-view { margin-bottom: 1rem; padding: .8rem; border: 1px solid #496454; border-radius: .65rem; background: #0b0e0c; }
+  .model-view pre { margin: .7rem 0 0; color: #d7e1d8; font: .76rem/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
   .join { margin-top: .65rem; color: #a8b4aa; font-size: .75rem; } .join .field { margin-top: .5rem; }
   .complete-editor { display: grid; grid-template-columns: 1fr auto; gap: .45rem; margin-top: .7rem; } .complete-editor input { min-width: 0; }
   .inbox-item { display: flex; justify-content: space-between; gap: 1rem; align-items: center; padding: .8rem; border: 1px solid #4b4029; background: #211d15; border-radius: .65rem; margin-bottom: .5rem; }

@@ -293,7 +293,15 @@ Restarting the process clears the graph.
 The topology is always rendered in its condensed form. Click a node's content
 to expose authoring and workflow controls for only that node, then close it to
 return the card to its dense form. `New node` beside the node count reveals the
-root capture form; there is no global editing mode.
+root capture form; there is no global editing mode. `LLM view` shows the exact
+compact text returned by `progress-builder/view` so a human can inspect the
+model-facing projection.
+
+Agenda closure is outcome-driven in this UI: a Know answers a To Know, while a
+Done completes a To Do. Spawn edges can connect any number of activities to an
+inquiry without closing it. The generic library status API still supports
+explicit `:closed` for compatibility, but the UI offers block, reopen, and
+cancel rather than manual closure.
 
 The builder also starts an nREPL server bound to localhost on an ephemeral
 port and writes that port to `.nrepl-port`. This is the preferred live agent

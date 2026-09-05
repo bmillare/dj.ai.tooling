@@ -362,7 +362,7 @@
                      " | actions: " (or (not-empty (alias-list aliases (frontier-ids :to-dos))) "none")
                      " | synthesis: " (or (not-empty (alias-list aliases (frontier-ids :unsynthesized-dones))) "none"))
         render-node
-        (fn [{:keys [id kind body status spawned-by resolves pinned-under artifacts]}]
+        (fn [{:keys [id kind body status spawned-by resolves resolved-by pinned-under artifacts]}]
           (let [[_ label] (render-kind kind)
                 indent (str/join (repeat (* 2 (depths id)) " "))
                 body (str/replace body "\n" (str "\n" indent "  "))
@@ -371,7 +371,10 @@
                 resolution (when (seq resolves)
                              (str " | resolves " (alias-list aliases resolves)))
                 state (when (and (agenda? {:kind kind}) (not= :open status))
-                        (str " | " (str/upper-case (name status))))
+                        (str " | "
+                             (if (and (= :closed status) (seq resolved-by))
+                               (case kind :to-know "ANSWERED" :to-do "COMPLETED")
+                               (str/upper-case (name status)))))
                 pin (when pinned-under (str " | pinned under " (aliases pinned-under)))
                 refs (when (seq artifacts)
                        (str " | refs " (str/join ", " (map :ref artifacts))))]

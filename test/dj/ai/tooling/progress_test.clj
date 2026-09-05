@@ -269,7 +269,7 @@
         rendered (progress/render-topology (progress/topology graph))]
     (is (= (str "FRONTIER | questions: Q1 | actions: none | synthesis: D1\n\n"
                 "[Q1] TO KNOW: What changed?\n"
-                "  [A1] TO DO: Run the check | CLOSED\n"
+                "  [A1] TO DO: Run the check | COMPLETED\n"
                 "    [D1] DONE: The check passed | resolves A1")
            rendered))
     (is (not (str/includes? rendered "created-at")))
