@@ -165,7 +165,12 @@
         body-draft (signal-name "bodyDraft" node-id)
         editing (signal-name "editing" node-id)
         nodes (remove #(= node-id (:id %)) (ordered-nodes graph))]
-    [:div.node-row {:data-section-start (boolean section-number)
+    [:div.node-row {:data-section-start (when section-number "true")
+                    :data-chain (when (and previous-id
+                                           (contains? (:spawned-by node) previous-id)
+                                           (not (#{:branch :last-branch}
+                                                 (peek (:gutter node)))))
+                                  "true")
                     :data-show (filter-expression graph node frontier contexts)}
      [:div.rails
       (for [cell (:gutter node)]
@@ -396,6 +401,7 @@
   .rails { display: flex; flex: none; } .rail { --rail-x: .6rem; position: relative; width: 1.4rem; }
   .rail[data-cell=rail]::before, .rail[data-cell=branch]::before { content: ''; position: absolute; left: var(--rail-x); top: calc(-1 * var(--row-gap)); bottom: calc(-1 * var(--row-gap)); border-left: 2px solid #484b53; }
   .rail[data-cell=branch]::after, .rail[data-cell=last-branch]::after { content: ''; position: absolute; left: var(--rail-x); right: -.05rem; top: calc(-1 * var(--row-gap)); height: calc(var(--row-gap) + 1rem); border-left: 2px solid #484b53; border-bottom: 2px solid #484b53; border-bottom-left-radius: .55rem; }
+  .node-row[data-chain=true] .node-card::before { content: ''; position: absolute; left: 1.1rem; top: calc(-1 * var(--row-gap) - 1px); height: calc(var(--row-gap) + 1px); border-left: 2px solid #484b53; }
   .node-heading { display: flex; align-items: center; gap: .5rem; } .sequence-number { display: inline-grid; place-items: center; min-width: 1.45rem; height: 1.45rem; padding: 0 .35rem; border-radius: 999px; background: #2a2c32; color: #c7c9ce; font-size: .7rem; font-weight: 800; }
   .node-card-actions { display: flex; align-items: center; gap: .35rem; }
   .edit-text, .add-node { border: 0; background: transparent; padding: .2rem .35rem; color: #a6a8ae; font-size: .72rem; }

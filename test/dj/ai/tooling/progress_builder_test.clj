@@ -100,6 +100,7 @@
         context-filter (str "$graphFilter == &apos;context:" (:id question) "&apos;")]
     (is (str/includes? body "class=\"status context-filter\""))
     (is (str/includes? body "Show this item in its graph context"))
+    (is (str/includes? body "data-chain=\"true\""))
     (is (= 3 (count (re-seq (re-pattern (java.util.regex.Pattern/quote context-filter))
                             body))))
     (is (not (str/includes?
