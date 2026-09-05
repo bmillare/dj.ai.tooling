@@ -95,7 +95,7 @@
              (get-in graph [:nodes answer-id :spawned-by])))
       (is (str/includes? page-body "Topology"))
       (is (str/includes? page-body "More links…"))
-      (is (not (str/includes? page-body "class=\"spawn-line\""))))))
+      (is (str/includes? page-body "class=\"from-line\"")))))
 
 (deftest topology-ui-groups-roots-and-their-late-descendants
   (let [first-root (builder/record! {:kind :done :body "First root"})
@@ -105,6 +105,16 @@
     (let [body (:body (builder/app {:request-method :get :uri "/"}))]
       (is (str/includes? body "class=\"sequence-number\">1"))
       (is (str/includes? body "class=\"sequence-number\">2")))))
+
+(deftest topology-ui-only-names-a-parent-when-it-is-not-directly-above
+  (let [root (builder/record! {:kind :done :body "Shared parent"})]
+    (builder/record! {:kind :know :body "First sibling"
+                      :spawned-by #{(:id root)}})
+    (builder/record! {:kind :know :body "Second sibling"
+                      :spawned-by #{(:id root)}})
+    (let [body (:body (builder/app {:request-method :get :uri "/"}))]
+      (is (= 1 (count (re-seq #"class=\"from-line\"" body))))
+      (is (not (str/includes? body "border-left: 2px solid #526259"))))))
 
 (deftest record-done-is-one-command-with-optional-note
   (add-root "to-do" "Run the experiment")

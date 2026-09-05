@@ -115,8 +115,9 @@
 (defn- short-body [graph node-id]
   (some-> (progress/node graph node-id) :body))
 
-(defn- node-card [graph node depth section-number]
+(defn- node-card [graph node depth section-number previous-id]
   (let [node-id (:id node)
+        distant-parents (remove #{previous-id} (:spawned-by node))
         draft (signal-name "draft" node-id)
         also-from (signal-name "alsoFrom" node-id)
         resolves (signal-name "resolves" node-id)
@@ -142,6 +143,10 @@
          [:span.status {:data-status (name (:status node))}
           (lifecycle-label graph node)])]
       [:p.body (:body node)]
+      (when (seq distant-parents)
+        [:div.lineage
+         (for [parent-id distant-parents]
+           [:div.from-line [:span "from"] (short-body graph parent-id)])])
       (when (seq (:resolves node))
         [:div.lineage
          (for [target-id (:resolves node)]
@@ -251,9 +256,12 @@
        [:pre (view)]]
       (if (seq nodes)
         [:div.node-list
-         (map #(node-card graph % (:display-depth %)
-                          (when (roots (:id %)) (section-numbers (:id %))))
-              nodes)]
+         (map-indexed
+          (fn [index node]
+            (node-card graph node (:display-depth node)
+                       (when (roots (:id node)) (section-numbers (:id node)))
+                       (:id (get nodes (dec index)))))
+          nodes)]
         [:div.empty-state "The graph is empty. Add a root to begin."])]]))
 
 (def ^:private styles
@@ -288,14 +296,13 @@
   .node-card[data-section-start=true] { margin-top: 1.65rem; } .node-card:first-child { margin-top: 0; }
   .node-heading { display: flex; align-items: center; gap: .5rem; } .sequence-number { display: inline-grid; place-items: center; min-width: 1.45rem; height: 1.45rem; padding: 0 .35rem; border-radius: 999px; background: #29352d; color: #c8d4ca; font-size: .7rem; font-weight: 800; }
   .node-card[style*=\"--depth:0\"] { width: min(48rem, 100%); }
-  .node-card:not([style*=\"--depth:0\"]):before { content: ''; position: absolute; left: -2.3rem; top: -1.05rem; width: 2rem; height: 2rem; border-left: 2px solid #526259; border-bottom: 2px solid #526259; border-radius: 0 0 0 .45rem; }
   .node-card[data-kind=know] { border-left-color: #8fdda9; } .node-card[data-kind=done] { border-left-color: #6eafdf; } .node-card[data-kind=to-know] { border-left-color: #dbb167; } .node-card[data-kind=to-do] { border-left-color: #d77c7c; }
   .kind { font-size: .75rem; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; } .status { color: #a8b4aa; font-size: .75rem; }
   .status[data-status=blocked], .status[data-status=cancelled] { color: #e6a1a1; } .body { font-size: 1.05rem; margin: .8rem 0 .45rem; white-space: pre-wrap; }
   .id { display: block; color: #718078; font-size: .68rem; overflow-wrap: anywhere; margin: .55rem 0; }
   .edges { color: #a8b4aa; font-size: .75rem; margin-top: .25rem; } .edges span { color: #718078; margin-right: .45rem; }
-  .lineage { margin: .5rem 0; display: grid; gap: .25rem; } .resolve-line { position: relative; color: #a8b4aa; font-size: .72rem; padding-left: 1rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .resolve-line:before, .resolved-by-line:before { content: ''; position: absolute; left: 0; top: .55em; width: .7rem; border-top: 2px dashed #6eafdf; } .resolve-line span, .resolved-by-line span { color: #718078; margin-right: .35rem; }
+  .lineage { margin: .5rem 0; display: grid; gap: .25rem; } .from-line, .resolve-line { position: relative; color: #a8b4aa; font-size: .72rem; padding-left: 1rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .from-line:before, .resolve-line:before, .resolved-by-line:before { content: ''; position: absolute; left: 0; top: .55em; width: .7rem; border-top: 2px dashed #6eafdf; } .from-line:before { border-color: #8fdda9; } .from-line span, .resolve-line span, .resolved-by-line span { color: #718078; margin-right: .35rem; }
   .resolved-by-line { position: relative; color: #a8b4aa; font-size: .72rem; padding-left: 1rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .pin-line, .synthesis-badge { color: #8fdda9; font-size: .72rem; margin: .4rem 0; } .synthesis-badge { color: #dbb167; }
   .inspector { color: #718078; font-size: .72rem; margin: .5rem 0; } .inspector summary, .join summary { cursor: pointer; }
@@ -304,7 +311,6 @@
   .graph { margin-top: 1.25rem; } .node-list { gap: .4rem; padding-top: 0; }
   .node-card { padding: .55rem .75rem; border-radius: .45rem; width: min(60rem, calc(100% - var(--depth) * 1.35rem)); margin-left: calc(var(--depth) * 1.35rem); }
   .node-card[style*=\"--depth:0\"] { width: min(60rem, 100%); }
-  .node-card:not([style*=\"--depth:0\"]):before { left: -1.65rem; top: -.45rem; width: 1.35rem; height: 1.1rem; }
   .body { font-size: .95rem; margin: .35rem 0 .2rem; } .lineage { margin: .2rem 0; }
   .node-content { cursor: pointer; } .node-content:hover .body { color: #fff; }
   .node-controls { border-top: 1px solid #3b463e; margin-top: .65rem; padding-top: .4rem; }
@@ -316,7 +322,7 @@
   .inbox-item { display: flex; justify-content: space-between; gap: 1rem; align-items: center; padding: .8rem; border: 1px solid #4b4029; background: #211d15; border-radius: .65rem; margin-bottom: .5rem; }
   .status-actions { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .8rem; } .status-actions button { font-size: .72rem; padding: .35rem .5rem; }
   .empty-state { border: 1px dashed #465048; border-radius: .75rem; padding: 3rem 1rem; text-align: center; color: #839087; }
-  @media (max-width: 700px) { main { padding-top: 2rem; } .frontier, .form-grid { grid-template-columns: 1fr; } .body-field { grid-column: auto; } .form-heading { align-items: flex-end; } .node-card { width: calc(100% - var(--depth) * .65rem); margin-left: calc(var(--depth) * .65rem); } .node-card:not([style*=\"--depth:0\"]):before { left: -.95rem; width: .7rem; } }
+  @media (max-width: 700px) { main { padding-top: 2rem; } .frontier, .form-grid { grid-template-columns: 1fr; } .body-field { grid-column: auto; } .form-heading { align-items: flex-end; } .node-card { width: calc(100% - var(--depth) * .65rem); margin-left: calc(var(--depth) * .65rem); } }
   ")
 
 (defn page []

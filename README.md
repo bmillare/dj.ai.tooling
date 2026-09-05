@@ -300,8 +300,10 @@ model-facing projection.
 The display groups each root with its complete spawn subtree even when a child
 is captured after a later root. Numbered root sections and extra spacing mark
 the major runs; linear chains stay flush, and indentation appears only where a
-parent forks. Since this full view includes every parent, it omits redundant
-`from` lines (a bounded future view may restore them at clipped boundaries).
+parent forks. A spawn whose parent is directly above needs no annotation; when
+a sibling subtree intervenes, a compact `from` line identifies the parent.
+Decorative curves are deliberately omitted because they cannot truthfully
+route an edge through a variable-height list.
 
 Agenda closure is outcome-driven in this UI: a Know answers a To Know, while a
 Done completes a To Do. Spawn edges can connect any number of activities to an
