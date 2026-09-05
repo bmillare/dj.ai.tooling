@@ -23,6 +23,21 @@
 (defn- signal-id [prefix node-id]
   (str prefix "_" (str/replace node-id #"[^A-Za-z0-9]" "_")))
 
+(deftest repl-api-reads-and-writes-without-exposing-the-atom
+  (let [question (builder/record! {:kind :to-know
+                                   :body "What friction does graph dogfooding reveal?"})
+        answer (builder/record! {:kind :know
+                                :body "The live API owns identity and time."
+                                :spawned-by #{(:id question)}
+                                :resolves #{(:id question)}})
+        topology (builder/topology)
+        current-question (first (:nodes topology))]
+    (is (= [(:id question)] (:roots topology)))
+    (is (= [(:id answer)] (:spawn-children current-question)))
+    (is (= [(:id answer)] (:resolved-by current-question)))
+    (is (= :closed (:status current-question)))
+    (is (= #{(:id question)} (:spawned-by answer)))))
+
 (deftest page-uses-current-state-subscription-and-kind-commit-actions
   (let [body (:body (builder/app {:request-method :get :uri "/"}))]
     (is (str/includes? body "data-dj-web-mobile-resume"))

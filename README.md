@@ -292,9 +292,9 @@ Restarting the process clears the graph.
 
 The builder also starts an nREPL server bound to localhost on an ephemeral
 port and writes that port to `.nrepl-port`. This is the preferred live agent
-seam: `dj.ai.tooling.progress-builder/state` is the exact atom backing the UI,
-and the pure progress query API can be evaluated against its graph without an
-HTTP representation. The state atom and subscription registry are `defonce`,
+seam: call `dj.ai.tooling.progress-builder/topology` to read the semantic graph
+and `dj.ai.tooling.progress-builder/record!` to add nodes without accessing the
+backing atom. The state atom and subscription registry are `defonce`,
 so reloading the builder namespace preserves the live graph. For example, with `clj-nrepl-eval` from
 `clojure-mcp-light` installed:
 

@@ -21,6 +21,23 @@
 (defonce state (atom initial-state))
 (defonce subscriptions (subscribed/registry))
 
+(defn topology
+  "Returns the agent-facing projection of the live graph without exposing its
+  storage shape. Intended for direct use through the embedded nREPL."
+  []
+  (progress/topology (:graph @state)))
+
+(defn record!
+  "Records a node in the live graph and returns its topology projection.
+  Generates process concerns (id and timestamp) when callers omit them."
+  [value]
+  (let [value (merge {:id (str (random-uuid))
+                      :created-at (java.util.Date.)}
+                     value)]
+    (swap! state update :graph progress/add-node value)
+    (subscribed/mark-dirty! subscriptions)
+    (some #(when (= (:id value) (:id %)) %) (:nodes (topology)))))
+
 (def ^:private kind-labels
   {:done "Done" :know "Know" :to-know "To know" :to-do "To do"})
 
