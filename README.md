@@ -318,6 +318,9 @@ The builder also starts an nREPL server bound to localhost on an ephemeral
 port and writes that port to `.nrepl-port`. This is the preferred live agent
 seam: call `dj.ai.tooling.progress-builder/topology` for structured graph data,
 `dj.ai.tooling.progress-builder/view` for dense model-facing text, and
+`dj.ai.tooling.progress-builder/current-work` or `current-work-view` for the
+live frontier with only its explanatory ancestry (optionally selected by
+author), and
 `dj.ai.tooling.progress-builder/record!` to add nodes without accessing the
 built-in recorder handle. `view` omits UUIDs, timestamps, empty fields, and repeated frontier
 bodies while retaining short aliases, topology, joins, resolutions, lifecycle

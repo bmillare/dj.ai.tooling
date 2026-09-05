@@ -90,6 +90,20 @@
     (is (str/includes? body "Showing focused graph context"))
     (is (str/includes? body "$graphFilter = &apos;&apos;"))))
 
+(deftest current-work-is-exposed-for-model-facing-reads
+  (let [root (builder/record! {:kind :know :body "Root context"
+                               :author {:actor :brent}})
+        _old (builder/record! {:kind :know :body "Inactive history"
+                               :author {:actor :brent}})
+        question (builder/record! {:kind :to-know :body "Agent question"
+                                   :spawned-by #{(:id root)}
+                                   :author {:actor :agent :session "test"}})
+        work (builder/current-work {:author {:actor :agent}})
+        rendered (builder/current-work-view {:author {:actor :agent}})]
+    (is (= [(:id root) (:id question)] (mapv :id (:nodes work))))
+    (is (str/includes? rendered "Agent question"))
+    (is (not (str/includes? rendered "Inactive history")))))
+
 (deftest frontier-items-wrap-within-their-groups
   (let [body (:body (builder/app {:request-method :get :uri "/"}))]
     (is (str/includes? body ".frontier-items button"))

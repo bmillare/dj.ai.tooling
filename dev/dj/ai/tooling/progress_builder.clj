@@ -73,6 +73,20 @@
   []
   (progress/render-topology (topology)))
 
+(defn current-work
+  "Returns the live frontier and its minimum explanatory topology. Options are
+  passed to progress/current-work; use {:author {:actor :agent}} to select
+  agent-authored frontier items while retaining context from every author."
+  ([] (current-work {}))
+  ([opts]
+   (progress/current-work (:graph @state) opts)))
+
+(defn current-work-view
+  "Returns the compact model-facing rendering of current-work."
+  ([] (current-work-view {}))
+  ([opts]
+   (progress/render-topology (current-work opts))))
+
 (defn record!
   "Records a node in the live graph and returns its topology projection.
   Generates process concerns (id and timestamp) when callers omit them, and
