@@ -90,6 +90,14 @@
     (is (str/includes? body "Showing focused graph context"))
     (is (str/includes? body "$graphFilter = &apos;&apos;"))))
 
+(deftest frontier-items-wrap-within-their-groups
+  (let [body (:body (builder/app {:request-method :get :uri "/"}))]
+    (is (str/includes? body ".frontier-items button"))
+    (is (str/includes? body "white-space: normal"))
+    (is (str/includes? body "overflow-wrap: anywhere"))
+    (is (not (str/includes? body
+                            ".frontier-items button { width: 100%; border: 0; background: transparent; padding: .3rem .35rem; color: #caccd1; font-size: .76rem; text-align: left; white-space: nowrap")))))
+
 (deftest open-status-focuses-an-agenda-node-with-ancestry-and-children
   (let [root (builder/record! {:kind :know :body "Root context"})
         question (builder/record! {:kind :to-know :body "Open question"

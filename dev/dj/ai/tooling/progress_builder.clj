@@ -463,7 +463,7 @@
   .frontier strong { font-size: 1.6rem; margin-right: .4rem; color: #8ab4f8; }
   .frontier span { color: #a6a8ae; }
   .frontier-items { display: grid; gap: .18rem; margin: .35rem 0 0; padding: 0; list-style: none; }
-  .frontier-items button { width: 100%; border: 0; background: transparent; padding: .3rem .35rem; color: #caccd1; font-size: .76rem; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .frontier-items button { width: 100%; border: 0; background: transparent; padding: .3rem .35rem; color: #caccd1; font-size: .76rem; text-align: left; white-space: normal; overflow-wrap: anywhere; }
   .frontier-items button:hover { background: #212329; color: #fff; }
   .frontier-empty { margin: .4rem .35rem .25rem; color: #75787f; font-size: .76rem; }
   .editor { background: #e8e9eb; color: #16171a; border-radius: 1rem; padding: 1.25rem; box-shadow: 0 1.5rem 4rem #0008; }
