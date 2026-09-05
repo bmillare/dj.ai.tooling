@@ -320,10 +320,11 @@ seam: call `dj.ai.tooling.progress-builder/topology` for structured graph data,
 `dj.ai.tooling.progress-builder/view` for dense model-facing text, and
 `dj.ai.tooling.progress-builder/current-work` or `current-work-view` for the
 live frontier with only its explanatory ancestry (optionally selected by
-author), and
+author), `changes-since` / `changes-since-view` for resumable event-cursor
+deltas, and
 `dj.ai.tooling.progress-builder/record!` to add nodes without accessing the
 built-in recorder handle. `view` omits UUIDs, timestamps, empty fields, and repeated frontier
-bodies while retaining short aliases, topology, joins, resolutions, lifecycle
+bodies while retaining canonical graph-local aliases, topology, joins, resolutions, lifecycle
 state, pins, and artifact references. The recorder handle and subscription
 registry are `defonce`, so reloading the builder namespace preserves the live
 graph. The shutdown hook drains and closes the recorder before releasing its
@@ -335,3 +336,11 @@ clj-nrepl-eval --discover-ports
 clj-nrepl-eval -p "$(<.nrepl-port)" \
   '(dj.ai.tooling.progress-builder/topology)'
 ```
+
+Aliases such as `K19`, `Q6`, and `A4` are assigned from the full append-only
+capture order and remain identical in projections. `record!` accepts aliases
+in `:spawned-by`, `:resolves`, and `:pinned-under`; `resolve!` accepts aliases
+for both resolver and targets. Bookmark the `:cursor` returned by
+`changes-since` and pass it on reconnect. A legacy graph with no event cursor
+returns its existing nodes as `:legacy-capture` events once; historical edits
+and resolutions cannot be reconstructed.

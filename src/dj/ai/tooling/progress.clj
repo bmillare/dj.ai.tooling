@@ -332,8 +332,36 @@
    :standing-context (standing-context graph {:focus focus})
    :frontier (frontier graph {:scope focus})})
 
+(def ^:private alias-prefix
+  {:done "D" :know "K" :to-know "Q" :to-do "A"})
+
+(defn aliases
+  "Returns the canonical graph-local alias maps. Aliases are derived from the
+  full append-only capture order, so every projection names a node identically."
+  [graph]
+  (let [id->alias
+        (:aliases
+         (reduce (fn [{:keys [counts aliases]} node-id]
+                   (let [prefix (alias-prefix (:kind (node graph node-id)))
+                         number (inc (get counts prefix 0))]
+                     {:counts (assoc counts prefix number)
+                      :aliases (assoc aliases node-id (str prefix number))}))
+                 {:counts {} :aliases {}}
+                 (:order graph)))]
+    {:id->alias id->alias
+     :alias->id (into {} (map (fn [[id alias]] [alias id])) id->alias)}))
+
+(defn resolve-id
+  "Resolves either a node id or a canonical alias such as \"K19\"."
+  [graph id-or-alias]
+  (or (when (node graph id-or-alias) id-or-alias)
+      (get-in (aliases graph) [:alias->id id-or-alias])
+      (fail "Progress node id or alias does not exist."
+            {:node-id-or-alias id-or-alias})))
+
 (defn- project-topology [graph node-ids projected-frontier]
-  (let [node-ids (set node-ids)]
+  (let [node-ids (set node-ids)
+        id->alias (:id->alias (aliases graph))]
     {:roots (into []
                   (comp (filter node-ids)
                         (filter #(empty? (filter node-ids
@@ -345,6 +373,7 @@
                                (let [value (node graph node-id)
                                      resolvers (resolved-by graph node-id)]
                                  (assoc value
+                                        :alias (id->alias node-id)
                                         :spawn-children
                                         (into [] (comp (map :id) (filter node-ids))
                                               (children graph node-id))
@@ -403,16 +432,6 @@
    :know ["K" "KNOW"]
    :to-know ["Q" "TO KNOW"]
    :to-do ["A" "TO DO"]})
-
-(defn- topology-aliases [nodes]
-  (:aliases
-   (reduce (fn [{:keys [counts aliases]} node]
-             (let [prefix (first (render-kind (:kind node)))
-                   number (inc (get counts prefix 0))]
-               {:counts (assoc counts prefix number)
-                :aliases (assoc aliases (:id node) (str prefix number))}))
-           {:counts {} :aliases {}}
-           nodes)))
 
 (defn- add-fork-lane
   "Prepends one gutter lane to an emitted branch. The branch's first node
@@ -497,7 +516,7 @@
   omitted. Short per-kind aliases retain enough identity to express joins,
   resolutions, state, and the current frontier."
   [{:keys [nodes frontier] :as topology}]
-  (let [aliases (topology-aliases nodes)
+  (let [aliases (into {} (map (juxt :id :alias)) nodes)
         display-nodes (topology-layout topology)
         frontier-ids (fn [key] (map :id (get frontier key)))
         summary (str "FRONTIER"

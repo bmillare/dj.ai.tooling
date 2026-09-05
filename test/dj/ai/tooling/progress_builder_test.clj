@@ -104,6 +104,32 @@
     (is (str/includes? rendered "Agent question"))
     (is (not (str/includes? rendered "Inactive history")))))
 
+(deftest aliases-are-write-addressable-and-stable-across-current-work
+  (let [_old (builder/record! {:kind :know :body "Inactive history"})
+        root (builder/record! {:kind :know :body "Live root"})
+        question (builder/record! {:kind :to-know :body "Question"
+                                   :spawned-by #{"K2"}})
+        answer (builder/record! {:kind :know :body "Answer"})]
+    (builder/resolve! (:alias answer) [(:alias question)])
+    (is (= (:id root) (builder/resolve-id "K2")))
+    (is (= "K2" (:alias root)))
+    (is (= #{(:id root)} (:spawned-by question)))
+    (is (str/includes? (builder/view) "[K2] KNOW: Live root"))))
+
+(deftest changes-since-uses-a-resumable-event-cursor
+  (let [first-node (builder/record! {:kind :know :body "First"})
+        first-delta (builder/changes-since)
+        cursor (:cursor first-delta)
+        second-node (builder/record! {:kind :to-know :body "Second"})
+        delta (builder/changes-since cursor)
+        rendered (builder/changes-since-view cursor)]
+    (is (= 1 cursor))
+    (is (= [:record] (mapv :op (:events delta))))
+    (is (= [[(:id second-node)]] (mapv :node-ids (:events delta))))
+    (is (= 2 (:cursor delta)))
+    (is (str/includes? rendered "CHANGES | since 1 | cursor 2"))
+    (is (not (str/includes? rendered (:id first-node))))))
+
 (deftest frontier-items-wrap-within-their-groups
   (let [body (:body (builder/app {:request-method :get :uri "/"}))]
     (is (str/includes? body ".frontier-items button"))

@@ -337,6 +337,21 @@
     (is (str/includes? (progress/render-topology work) "| ANSWERED"))
     (is (not (str/includes? (progress/render-topology work) "| CLOSED")))))
 
+(deftest canonical-aliases-survive-projections
+  (let [graph (-> (progress/empty-graph)
+                  (add :old :know "Inactive history" [] 0)
+                  (add :root :know "Live root citing K1" [] 1)
+                  (add :question :to-know "What now?" [:root] 2))
+        full (progress/topology graph)
+        work (progress/current-work graph)]
+    (is (= {:old "K1" :root "K2" :question "Q1"}
+           (get (progress/aliases graph) :id->alias)))
+    (is (= :root (progress/resolve-id graph "K2")))
+    (is (= [:root :question] (mapv :id (:nodes work))))
+    (is (= ["K2" "Q1"] (mapv :alias (:nodes work))))
+    (is (str/includes? (progress/render-topology work) "[K2] KNOW"))
+    (is (= "K2" (:alias (second (:nodes full)))))))
+
 (deftest current-work-keeps-resolution-target-for-synthesis-context
   (let [graph (-> (progress/empty-graph)
                   (add :todo :to-do "Run experiment" [] 0)

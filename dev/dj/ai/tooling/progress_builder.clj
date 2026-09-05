@@ -18,6 +18,8 @@
 
 (def initial-state
   {:graph (progress/empty-graph)
+   :events []
+   :event-cursor 0
    :notice nil})
 
 (def ^:private state-path
@@ -59,8 +61,58 @@
 (defn- author-event
   "Stamps write provenance onto the builder state. The recorder log persists
   every transaction, so this yields per-event authorship for free."
-  [current author op]
-  (assoc current :last-event {:author author :op op :at (java.util.Date.)}))
+  ([current author op] (author-event current author op {}))
+  ([current author op details]
+   (let [cursor (inc (or (:event-cursor current) 0))
+         event (merge {:cursor cursor :author author :op op
+                       :at (java.util.Date.)}
+                      details)]
+     (-> current
+         (assoc :event-cursor cursor :last-event event)
+         (update :events (fnil conj []) event)))))
+
+(defn resolve-id
+  "Resolves a UUID/id or canonical graph alias such as \"K19\"."
+  [id-or-alias]
+  (progress/resolve-id (:graph @state) id-or-alias))
+
+(defn changes-since
+  "Returns builder events after cursor and the cursor to bookmark next.
+  Legacy graphs expose their existing nodes as capture events when cursor is
+  zero; historical non-capture events cannot be reconstructed."
+  ([] (changes-since 0))
+  ([cursor]
+   (let [{:keys [graph events event-cursor]} @state
+         legacy? (nil? event-cursor)
+         legacy (when (and legacy? (zero? cursor))
+                  (map-indexed (fn [index node-id]
+                                 {:cursor (inc index)
+                                  :op :legacy-capture
+                                  :node (some #(when (= node-id (:id %)) %)
+                                              (:nodes (progress/topology graph)))})
+                               (:order graph)))]
+     {:since cursor
+      :cursor (or event-cursor (count (:order graph)))
+      :events (into (vec legacy) (filter #(> (:cursor %) cursor)) events)})))
+
+(defn changes-since-view
+  "Compact model-facing rendering of changes-since."
+  ([] (changes-since-view 0))
+  ([cursor]
+   (let [{next-cursor :cursor events :events} (changes-since cursor)
+         graph (:graph @state)
+         alias-for #(get-in (progress/aliases graph) [:id->alias %])]
+     (str "CHANGES | since " cursor " | cursor " next-cursor
+          (when (seq events)
+            (str "\n\n"
+                 (str/join "\n"
+                           (map (fn [{:keys [cursor op node node-ids author]}]
+                                  (str "[" cursor "] " (name op)
+                                       (when node (str " " (:alias node) ": " (:body node)))
+                                       (when (seq node-ids)
+                                         (str " " (str/join ", " (map #(or (alias-for %) %) node-ids))))
+                                       (when author (str " | by " (progress/author-label author)))))
+                                events))))))))
 
 (defn topology
   "Returns the agent-facing projection of the live graph without exposing its
@@ -92,14 +144,20 @@
   Generates process concerns (id and timestamp) when callers omit them, and
   stamps the identity declared via `identify!` unless :author is supplied."
   [value]
-  (let [author (or (:author value) (repl-author!))
+  (let [graph (:graph @state)
+        resolve-refs #(into #{} (map (partial progress/resolve-id graph)) %)
+        value (cond-> value
+                (:spawned-by value) (update :spawned-by resolve-refs)
+                (:resolves value) (update :resolves resolve-refs)
+                (:pinned-under value) (update :pinned-under (partial progress/resolve-id graph)))
+        author (or (:author value) (repl-author!))
         value (merge {:id (str (random-uuid))
                       :created-at (java.util.Date.)
                       :author author}
                      value)]
     (transact! #(-> %
                     (update :graph progress/add-node value)
-                    (author-event author :record)))
+                    (author-event author :record {:node-ids [(:id value)]})))
     (subscribed/mark-dirty! subscriptions)
     (some #(when (= (:id value) (:id %)) %) (:nodes (topology)))))
 
@@ -108,10 +166,14 @@
   targets after the fact and closes them. Intended for direct use through the
   embedded nREPL alongside `record!`; requires `identify!` first."
   [resolver-id target-ids]
-  (let [author (repl-author!)]
+  (let [graph (:graph @state)
+        resolver-id (progress/resolve-id graph resolver-id)
+        target-ids (mapv (partial progress/resolve-id graph) target-ids)
+        author (repl-author!)]
     (transact! #(-> %
                     (update :graph progress/resolve resolver-id target-ids)
-                    (author-event author :resolve)))
+                    (author-event author :resolve
+                                  {:node-ids (into [resolver-id] target-ids)})))
     (subscribed/mark-dirty! subscriptions)
     (some #(when (= resolver-id (:id %)) %) (:nodes (topology)))))
 
@@ -556,10 +618,15 @@
 (defn- commit! [update-fn success-message]
   (try
     (transact! (fn [{:keys [graph] :as current}]
-                 (-> current
-                     (assoc :graph (update-fn graph)
-                            :notice {:level :success :message success-message})
-                     (author-event ui-author :ui))))
+                 (let [updated (update-fn graph)
+                       ids (into []
+                                 (filter #(not= (get-in graph [:nodes %])
+                                                (get-in updated [:nodes %])))
+                                 (:order updated))]
+                   (-> current
+                       (assoc :graph updated
+                              :notice {:level :success :message success-message})
+                       (author-event ui-author :ui {:node-ids ids})))))
     (catch clojure.lang.ExceptionInfo error
       (transact! #(assoc % :notice {:level :error :message (ex-message error)}))))
   (subscribed/mark-dirty! subscriptions)
