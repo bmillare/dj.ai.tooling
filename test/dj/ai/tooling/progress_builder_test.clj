@@ -2,6 +2,7 @@
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest is use-fixtures]]
+            [dj.ai.tooling.progress :as progress]
             [dj.ai.tooling.progress-builder :as builder]
             [dj.recorder :as recorder]
             [dj.recorder.patch :as recorder.patch]))
@@ -129,6 +130,22 @@
     (is (= 2 (:cursor delta)))
     (is (str/includes? rendered "CHANGES | since 1 | cursor 2"))
     (is (not (str/includes? rendered (:id first-node))))))
+
+(deftest first-event-continues-after-a-legacy-graph-cursor
+  (let [legacy-graph (-> (progress/empty-graph)
+                         (progress/add-node {:id :k1 :kind :know :body "Old one"
+                                             :created-at #inst "2026-09-05"})
+                         (progress/add-node {:id :k2 :kind :know :body "Old two"
+                                             :created-at #inst "2026-09-05"}))]
+    @(recorder/patch! builder/state
+                      (recorder.patch/->Replace {:graph legacy-graph
+                                                 :event-cursor 0
+                                                 :events []}))
+    (let [new-node (builder/record! {:kind :know :body "New three"})]
+      (is (= 3 (get-in @builder/state [:last-event :cursor])))
+      (is (= 3 (:cursor (builder/changes-since 2))))
+      (is (= [(:id new-node)]
+             (get-in (builder/changes-since 2) [:events 0 :node-ids]))))))
 
 (deftest frontier-items-wrap-within-their-groups
   (let [body (:body (builder/app {:request-method :get :uri "/"}))]

@@ -63,7 +63,16 @@
   every transaction, so this yields per-event authorship for free."
   ([current author op] (author-event current author op {}))
   ([current author op details]
-   (let [cursor (inc (or (:event-cursor current) 0))
+   (let [events (:events current)
+         ;; A recorder opened from an older baseline may inherit cursor zero
+         ;; while already containing nodes. Continue after those synthetic
+         ;; legacy-capture cursors instead of restarting at one.
+         legacy-base (when (and (zero? (or (:event-cursor current) 0))
+                                (empty? events))
+                       (- (count (get-in current [:graph :order]))
+                          (if (= :record op) 1 0)))
+         cursor (inc (max (or (:event-cursor current) 0)
+                          (or legacy-base 0)))
          event (merge {:cursor cursor :author author :op op
                        :at (java.util.Date.)}
                       details)]
