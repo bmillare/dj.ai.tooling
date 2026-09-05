@@ -11,14 +11,15 @@
             [dj.web.datastar.subscribed :as subscribed]
             [dj.web.html :as html]
             [dj.web.http :as http]
-            [dj.web.http.response :as response]))
+            [dj.web.http.response :as response]
+            [nrepl.server :as nrepl]))
 
 (def initial-state
   {:graph (progress/empty-graph)
    :notice nil})
 
-(def state (atom initial-state))
-(def subscriptions (subscribed/registry))
+(defonce state (atom initial-state))
+(defonce subscriptions (subscribed/registry))
 
 (def ^:private kind-labels
   {:done "Done" :know "Know" :to-know "To know" :to-do "To do"})
@@ -337,12 +338,6 @@
     [:get "/"] (response/html-response (page))
     [:get "/updates"]
     (subscribed/subscription-response request subscriptions #'render-main!)
-    [:get "/api/graph"]
-    (response/response (pr-str (progress/topology (:graph @state)))
-                       "application/edn; charset=utf-8")
-    [:get "/api/raw"]
-    (response/response (pr-str (:graph @state))
-                       "application/edn; charset=utf-8")
     [:post "/add-root"] (add-root! request)
     [:post "/spawn"] (spawn-node! request)
     [:post "/complete"] (complete! request)
@@ -350,9 +345,18 @@
     [:post "/set-status"] (set-status! request)
     response/not-found))
 
+(defn- write-nrepl-port! [server]
+  (spit ".nrepl-port" (str (:port server)))
+  server)
+
 (defn -main [& _]
   (let [port (parse-long (or (System/getenv "PORT") "9090"))
-        server (http/start! #'app {:port port})]
-    (.addShutdownHook (Runtime/getRuntime) (Thread. #(http/stop! server)))
+        server (http/start! #'app {:port port})
+        repl (write-nrepl-port! (nrepl/start-server :bind "127.0.0.1" :port 0))]
+    (.addShutdownHook
+     (Runtime/getRuntime)
+     (Thread. #(do (http/stop! server)
+                   (nrepl/stop-server repl))))
     (println (str "progress graph builder: http://localhost:" (http/port server)))
+    (println (str "nREPL server: 127.0.0.1:" (:port repl) " (.nrepl-port)"))
     @(promise)))

@@ -83,19 +83,17 @@
   (is (= :error (get-in @builder/state [:notice :level])))
   (is (str/includes? (get-in @builder/state [:notice :message]) "does not exist")))
 
-(deftest read-api-exposes-derived-topology-and-raw-storage
-  (add-root "to-know" "What matters?")
-  (let [derived (builder/app {:request-method :get :uri "/api/graph"})
-        raw (builder/app {:request-method :get :uri "/api/raw"})]
-    (is (= "application/edn; charset=utf-8"
-           (get-in derived [:headers "Content-Type"])))
-    (is (str/includes? (:body derived) ":roots"))
-    (is (str/includes? (:body derived) ":frontier"))
-    (is (str/includes? (:body raw) ":spawn-children"))))
-
 (deftest node-local-authoring-resets-draft-and-renders-vertical-depth
   (add-root "know" "Root")
   (let [body (:body (builder/app {:request-method :get :uri "/"}))]
     (is (str/includes? body "await @post"))
     (is (str/includes? body "; $draft_"))
     (is (str/includes? body "--depth:0"))))
+
+(deftest nrepl-port-file-reflects-server-port
+  (let [written (atom nil)]
+    (with-redefs [clojure.core/spit (fn [path value]
+                                     (reset! written [path value]))]
+      (is (= {:port 45678}
+             (#'builder/write-nrepl-port! {:port 45678}))))
+    (is (= [".nrepl-port" "45678"] @written))))

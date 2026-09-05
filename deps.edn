@@ -10,7 +10,8 @@
 
   :graph-builder
   {:extra-paths ["dev"]
-   :extra-deps {io.github.bmillare/dj.web
+   :extra-deps {nrepl/nrepl {:mvn/version "1.5.1"}
+                io.github.bmillare/dj.web
                 {:git/sha "518b6fe21cf020af2cd21c27d2ac84707344c13c"}}
    :main-opts ["-m" "dj.ai.tooling.progress-builder"]}
 
@@ -21,7 +22,8 @@
 
   :test
   {:extra-paths ["dev" "test"]
-   :extra-deps {io.github.bmillare/dj.web
+   :extra-deps {nrepl/nrepl {:mvn/version "1.5.1"}
+                io.github.bmillare/dj.web
                 {:git/sha "518b6fe21cf020af2cd21c27d2ac84707344c13c"}
                 io.github.cognitect-labs/test-runner
                 {:git/tag "v0.5.1" :git/sha "dfb30dd"}

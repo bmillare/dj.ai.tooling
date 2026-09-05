@@ -286,8 +286,20 @@ inbox; knowledge captured anywhere in the resolved To Do's subtree counts as
 synthesis. The topology reads downward with visible depth guides, and a
 successful node-local capture clears its draft.
 
-Agents and alternate renderers can read `GET /api/graph` as EDN. It projects
-capture-ordered nodes with direct `:spawn-children` and `:resolved-by` edges,
-plus roots and the derived frontier. `GET /api/raw` exposes the storage value
-for debugging and comparison; consumers should prefer the semantic projection.
+The pure `progress/topology` query projects capture-ordered nodes with direct
+`:spawn-children` and `:resolved-by` edges, plus roots and the derived frontier.
 Restarting the process clears the graph.
+
+The builder also starts an nREPL server bound to localhost on an ephemeral
+port and writes that port to `.nrepl-port`. This is the preferred live agent
+seam: `dj.ai.tooling.progress-builder/state` is the exact atom backing the UI,
+and the pure progress query API can be evaluated against its graph without an
+HTTP representation. The state atom and subscription registry are `defonce`,
+so reloading the builder namespace preserves the live graph. For example, with `clj-nrepl-eval` from
+`clojure-mcp-light` installed:
+
+```bash
+clj-nrepl-eval --discover-ports
+clj-nrepl-eval -p "$(<.nrepl-port)" \
+  '(dj.ai.tooling.progress/topology (:graph @dj.ai.tooling.progress-builder/state))'
+```
