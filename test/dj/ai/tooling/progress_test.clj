@@ -291,6 +291,46 @@
     (is (= [:done-b]
            (mapv :id (get-in view [:frontier :unsynthesized-dones]))))))
 
+(deftest current-work-keeps-frontier-and-minimum-explanatory-topology
+  (let [graph (-> (progress/empty-graph)
+                  (progress/add-node {:id :root :kind :know :body "Root"
+                                      :author {:actor :brent}
+                                      :created-at #inst "2026-09-04"})
+                  (progress/add-node {:id :closed-q :kind :to-know :body "Settled?"
+                                      :spawned-by #{:root} :status :closed
+                                      :author {:actor :brent}
+                                      :created-at #inst "2026-09-04T00:01:00Z"})
+                  (progress/add-node {:id :agent-q :kind :to-know :body "Still open?"
+                                      :spawned-by #{:closed-q}
+                                      :author {:actor :agent :session "one"}
+                                      :created-at #inst "2026-09-04T00:02:00Z"})
+                  (progress/add-node {:id :dead-root :kind :know :body "Old branch"
+                                      :author {:actor :brent}
+                                      :created-at #inst "2026-09-04T00:03:00Z"})
+                  (progress/add-node {:id :brent-action :kind :to-do :body "Human work"
+                                      :spawned-by #{:root} :author {:actor :brent}
+                                      :created-at #inst "2026-09-04T00:04:00Z"}))
+        all-work (progress/current-work graph)
+        agent-work (progress/current-work graph {:author {:actor :agent}})]
+    (is (= [:root :closed-q :agent-q :brent-action]
+           (mapv :id (:nodes all-work))))
+    (is (= [:root :closed-q :agent-q]
+           (mapv :id (:nodes agent-work))))
+    (is (= [:agent-q]
+           (mapv :id (get-in agent-work [:frontier :to-knows]))))
+    (is (empty? (get-in agent-work [:frontier :to-dos])))
+    (is (= {:actor :brent} (:author (first (:nodes agent-work)))))))
+
+(deftest current-work-keeps-resolution-target-for-synthesis-context
+  (let [graph (-> (progress/empty-graph)
+                  (add :todo :to-do "Run experiment" [] 0)
+                  (progress/complete :todo {:id :done :body "It ran"
+                                            :created-at #inst "2026-09-04T00:01:00Z"}))
+        work (progress/current-work graph)]
+    (is (= [:todo :done] (mapv :id (:nodes work))))
+    (is (= [:done]
+           (mapv :id (get-in work [:frontier :unsynthesized-dones]))))))
+
 (deftest topology-render-is-dense-readable-and-relational
   (let [graph (-> (progress/empty-graph)
                   (add :q :to-know "What changed?" [] 0)

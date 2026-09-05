@@ -332,25 +332,60 @@
    :standing-context (standing-context graph {:focus focus})
    :frontier (frontier graph {:scope focus})})
 
+(defn- project-topology [graph node-ids projected-frontier]
+  (let [node-ids (set node-ids)]
+    {:roots (into []
+                  (comp (filter node-ids)
+                        (filter #(empty? (filter node-ids
+                                                 (:spawned-by (node graph %))))))
+                  (:order graph))
+     :nodes (into []
+                  (comp (filter node-ids)
+                        (map (fn [node-id]
+                               (let [value (node graph node-id)]
+                                 (assoc value
+                                        :spawn-children
+                                        (into [] (comp (map :id) (filter node-ids))
+                                              (children graph node-id))
+                                        :resolved-by
+                                        (into [] (comp (map :id) (filter node-ids))
+                                              (resolved-by graph node-id)))))))
+                  (:order graph))
+     :frontier projected-frontier}))
+
 (defn topology
   "Returns a compact, capture-ordered projection for renderers and agents.
   Unlike the storage graph, every node carries its direct outgoing spawn and
   incoming resolution edges, so consumers need not understand reverse indexes."
   [graph]
-  {:roots (into []
-                (comp (map #(node graph %))
-                      (filter #(empty? (:spawned-by %)))
-                      (map :id))
-                (:order graph))
-   :nodes (mapv (fn [node-id]
-                  (let [value (node graph node-id)]
-                    (assoc value
-                           :spawn-children
-                           (mapv :id (children graph node-id))
-                           :resolved-by
-                           (mapv :id (resolved-by graph node-id)))))
-                (:order graph))
-   :frontier (frontier graph)})
+  (project-topology graph (:order graph) (frontier graph)))
+
+(defn current-work
+  "Returns the live frontier plus its minimum explanatory topology.
+
+  Closed history is omitted unless it is a spawn ancestor of a frontier item
+  or a resolution target of a pending synthesis result. An optional :author
+  selector filters frontier seeds; context is never filtered by author. A
+  partial selector such as {:actor :agent} matches every agent session."
+  ([graph] (current-work graph {}))
+  ([graph {:keys [author]}]
+   (when (and author (not (valid-author? author)))
+     (fail ":author must be a map of a keyword :actor and optional string :session."
+           {:author author}))
+   (let [matches-author? (fn [value]
+                           (or (nil? author)
+                               (every? (fn [[key expected]]
+                                         (= expected (get-in value [:author key])))
+                                       author)))
+         live-frontier (update-vals (frontier graph)
+                                    #(into [] (filter matches-author?) %))
+         seeds (mapcat identity (vals live-frontier))
+         resolution-targets (mapcat #(map (partial node graph) (:resolves %)) seeds)
+         context-heads (concat seeds resolution-targets)
+         node-ids (into (set (map :id context-heads))
+                        (mapcat #(map :id (ancestors graph (:id %))))
+                        context-heads)]
+     (project-topology graph node-ids live-frontier))))
 
 (defn author-label
   "Compact display form of a node's :author, e.g. \"brent\" or \"agent/ri-67\".
