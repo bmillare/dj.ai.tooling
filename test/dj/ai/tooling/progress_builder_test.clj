@@ -54,7 +54,7 @@
 (deftest topology-is-dense-with-root-and-node-local-editing
   (add-root "know" "Content remains prominent")
   (let [body (:body (builder/app {:request-method :get :uri "/"}))]
-    (is (str/includes? body "data-signals__ifmissing=\"{creatingRoot: false, showingModelView: false, graphFilter: &apos;&apos;}\""))
+    (is (str/includes? body "data-signals__ifmissing=\"{creatingRoot: false, showingModelView: false, showingChanges: false, changesCursor: &apos;&apos;, graphFilter: &apos;&apos;}\""))
     (is (str/includes? body "data-show=\"$creatingRoot\""))
     (is (str/includes? body "$editing_"))
     (is (str/includes? body "New node"))
@@ -116,6 +116,45 @@
     (is (= "K2" (:alias root)))
     (is (= #{(:id root)} (:spawned-by question)))
     (is (str/includes? (builder/view) "[K2] KNOW: Live root"))))
+
+(deftest ui-cards-and-selectors-carry-canonical-aliases
+  (let [root (builder/record! {:kind :know :body "Aliased root"})
+        question (builder/record! {:kind :to-know :body "Aliased question"
+                                   :spawned-by #{(:id root)}})]
+    (builder/record! {:kind :know :body "Aliased answer"
+                      :resolves #{(:id question)}})
+    (let [body (:body (builder/app {:request-method :get :uri "/"}))]
+      (is (str/includes? body "class=\"alias\">K1"))
+      (is (str/includes? body "class=\"alias\">Q1"))
+      (is (str/includes? body "class=\"alias\">K2"))
+      ;; selector options and lineage lines lead with the same handle
+      (is (str/includes? body "K1 · Know · Aliased root"))
+      (is (str/includes? body "answered by</span>K2 · Aliased answer"))
+      (is (str/includes? body (str "K2 · " (builder/resolve-id "K2")))))))
+
+(deftest current-work-is-a-browser-lens
+  (let [root (builder/record! {:kind :know :body "Live root"})
+        _closed (builder/record! {:kind :know :body "Inactive history"})]
+    (builder/record! {:kind :to-know :body "Open question"
+                      :spawned-by #{(:id root)}})
+    (let [body (:body (builder/app {:request-method :get :uri "/"}))]
+      (is (str/includes? body "Current work"))
+      (is (str/includes? body "$graphFilter = &apos;current-work&apos;"))
+      ;; frontier item and its ancestry match the lens; closed history does not
+      (is (= 2 (count (re-seq #"\$graphFilter == &apos;current-work&apos;" body)))))))
+
+(deftest changes-panel-filters-on-a-client-side-cursor
+  (let [first-node (builder/record! {:kind :know :body "First change"})
+        _second (builder/record! {:kind :to-know :body "Second change"})
+        body (:body (builder/app {:request-method :get :uri "/"}))]
+    (is (str/includes? body "$showingChanges"))
+    (is (str/includes? body "Changes since · bookmark cursor 2"))
+    (is (str/includes? body "data-bind=\"changesCursor\""))
+    (is (str/includes? body "($changesCursor || 0) &lt; 1"))
+    (is (str/includes? body "($changesCursor || 0) &lt; 2"))
+    (is (str/includes? body (str "K1 · First change")))
+    (is (str/includes? body "~agent/test"))
+    first-node))
 
 (deftest changes-since-uses-a-resumable-event-cursor
   (let [first-node (builder/record! {:kind :know :body "First"})
@@ -208,8 +247,10 @@
     (builder/record! {:kind :know :body "Late child"
                       :spawned-by #{(:id first-root)}})
     (let [body (:body (builder/app {:request-method :get :uri "/"}))]
-      (is (str/includes? body "class=\"sequence-number\">1"))
-      (is (str/includes? body "class=\"sequence-number\">2")))))
+      (is (str/includes? body "class=\"alias\">D1"))
+      (is (str/includes? body "class=\"alias\">D2"))
+      (is (str/includes? body "class=\"alias\">K1"))
+      (is (str/includes? body "data-section-start=\"true\"")))))
 
 (deftest topology-ui-only-names-a-parent-when-it-is-not-directly-above
   (let [root (builder/record! {:kind :done :body "Shared parent"})]

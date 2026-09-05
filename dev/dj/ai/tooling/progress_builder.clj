@@ -221,11 +221,13 @@
       (and (= :know kind) (= :to-know (:kind node)))))
 
 (defn- ordered-nodes [graph]
-  (mapv #(progress/node graph %) (:order graph)))
+  (let [alias-of (:id->alias (progress/aliases graph))]
+    (mapv #(assoc (progress/node graph %) :alias (alias-of %))
+          (:order graph))))
 
 (defn- option [node]
   [:option {:value (:id node)}
-   (str (get kind-labels (:kind node)) " · " (:body node))])
+   (str (:alias node) " · " (get kind-labels (:kind node)) " · " (:body node))])
 
 (defn- select-field [label bind-name nodes {:keys [allow-empty?]}]
   [:label.field
@@ -273,12 +275,18 @@
 (defn- short-body [graph node-id]
   (some-> (progress/node graph node-id) :body))
 
+(defn- aliased-body
+  "Canonical alias plus prose, the coordination handle shared with the LLM
+  view and the nREPL write API."
+  [graph alias-of node-id]
+  (str (alias-of node-id) " · " (short-body graph node-id)))
+
 (defn- context-node-ids [graph focus-id]
   (into #{focus-id}
         (concat (map :id (progress/ancestors graph focus-id))
                 (map :id (progress/children graph focus-id)))))
 
-(defn- filter-expression [graph node frontier contexts]
+(defn- filter-expression [graph node frontier contexts current-work-ids]
   (let [node-id (:id node)
         question-ids (set (map :id (:to-knows frontier)))
         action-ids (set (map :id (:to-dos frontier)))
@@ -288,6 +296,7 @@
          (when (question-ids node-id) " || $graphFilter == 'questions'")
          (when (action-ids node-id) " || $graphFilter == 'actions'")
          (when (synthesis-ids node-id) " || $graphFilter == 'synthesis'")
+         (when (current-work-ids node-id) " || $graphFilter == 'current-work'")
          (when (resolution-targets node-id)
            (str " || $graphFilter == 'resolution:" node-id "'"))
          (apply str
@@ -298,7 +307,8 @@
                       :when (context-ids node-id)]
                   (str " || $graphFilter == 'context:" focus-id "'"))))))
 
-(defn- node-card [graph frontier contexts node section-number previous-id]
+(defn- node-card [{:keys [graph frontier contexts current-work-ids alias-of]}
+                  node section-start? previous-id]
   (let [node-id (:id node)
         distant-parents (remove #{previous-id} (:spawned-by node))
         draft (signal-name "draft" node-id)
@@ -314,13 +324,14 @@
         resolvable (filterv #(and (compatible-target? (:kind node) %)
                                   (#{:open :blocked} (:status %)))
                             nodes)]
-    [:div.node-row {:data-section-start (when section-number "true")
+    [:div.node-row {:data-section-start (when section-start? "true")
                     :data-chain (when (and previous-id
                                            (contains? (:spawned-by node) previous-id)
                                            (not (#{:branch :last-branch}
                                                  (peek (:gutter node)))))
                                   "true")
-                    :data-show (filter-expression graph node frontier contexts)}
+                    :data-show (filter-expression graph node frontier contexts
+                                                  current-work-ids)}
      [:div.rails
       (for [cell (:gutter node)]
         [:span.rail {:data-cell (name cell)}])]
@@ -334,7 +345,7 @@
      [:div.node-content
       [:header
        [:div.node-heading
-        (when section-number [:span.sequence-number section-number])
+        [:span.alias (:alias node)]
         [:span.kind (get kind-labels (:kind node))]
         (when-let [author (:author node)]
           [:span.byline (str "~" (progress/author-label author))])]
@@ -368,19 +379,20 @@
       (when (seq distant-parents)
         [:div.lineage
          (for [parent-id distant-parents]
-           [:div.from-line [:span "from"] (short-body graph parent-id)])])
+           [:div.from-line [:span "from"] (aliased-body graph alias-of parent-id)])])
       (when (seq (:resolves node))
         [:div.lineage
          (for [target-id (:resolves node)]
-           [:div.resolve-line [:span "resolves"] (short-body graph target-id)])])
+           [:div.resolve-line [:span "resolves"]
+            (aliased-body graph alias-of target-id)])])
       (when-let [resolvers (seq (progress/resolved-by graph node-id))]
         [:div.lineage
          (for [resolver resolvers]
            [:div.resolved-by-line
             [:span (if (= :to-know (:kind node)) "answered by" "completed by")]
-            (:body resolver)])])
+            (aliased-body graph alias-of (:id resolver))])])
       (when-let [pinned-under (:pinned-under node)]
-        [:div.pin-line "standing under " (short-body graph pinned-under)])
+        [:div.pin-line "standing under " (aliased-body graph alias-of pinned-under)])
       (when (progress/synthesis-pending? graph node-id)
         [:div.synthesis-badge "Awaiting synthesis"])]
      [:div.node-controls {:data-show (str "$" editing)}
@@ -394,8 +406,9 @@
         "Save text"]]
       [:details.inspector
        [:summary "Inspect"]
-       [:code.id node-id]
-       (edge-list "resolved by" (map :id (progress/resolved-by graph node-id)))]
+       [:code.id (str (:alias node) " · " node-id)]
+       (edge-list "resolved by"
+                  (map (comp alias-of :id) (progress/resolved-by graph node-id)))]
       [:div.local-editor
        [:div.composer-label "Spawn from this node"]
        [:textarea {:data-bind draft :rows "2" :placeholder "Spawn a thought from here…"}]
@@ -459,7 +472,7 @@
                    :data-on:click (str "@post('/nothing-learned?node=" (:id done) "')")}
           "Nothing learned"]]])]))
 
-(defn- frontier-group [filter-value label nodes]
+(defn- frontier-group [alias-of filter-value label nodes]
   [:section.frontier-group
    [:button.frontier-heading
     {:type "button" :data-on:click (str "$graphFilter = '" filter-value "'")}
@@ -470,15 +483,45 @@
         [:li [:button {:type "button"
                        :title "Show this item in its graph context"
                        :data-on:click (str "$graphFilter = 'context:" (:id node) "'")}
-              (:body node)]])]
+              (str (alias-of (:id node)) " · " (:body node))]])]
      [:p.frontier-empty "None"])])
 
-(defn- frontier-summary [frontier]
+(defn- frontier-summary [alias-of frontier]
   (let [{:keys [to-knows to-dos unsynthesized-dones]} frontier]
     [:section.frontier
-     (frontier-group "questions" "open questions" to-knows)
-     (frontier-group "actions" "open actions" to-dos)
-     (frontier-group "synthesis" "results to review" unsynthesized-dones)]))
+     (frontier-group alias-of "questions" "open questions" to-knows)
+     (frontier-group alias-of "actions" "open actions" to-dos)
+     (frontier-group alias-of "synthesis" "results to review" unsynthesized-dones)]))
+
+(defn- change-row
+  "One authored (or legacy-capture) event; visibility is client-side so the
+  cursor input filters without a server round trip."
+  [graph alias-of {:keys [cursor op node node-ids author]}]
+  [:li.change-row {:data-show (str "($changesCursor || 0) < " cursor)}
+   [:span.change-cursor (str "[" cursor "]")]
+   [:span.change-op (name op)]
+   [:span.change-refs
+    (str/join " · "
+              (if node
+                [(str (:alias node) " · " (:body node))]
+                (map #(aliased-body graph alias-of %) node-ids)))]
+   (when author [:span.byline (str "~" (progress/author-label author))])])
+
+(defn- changes-panel
+  "Browser lens over changes-since. The bookmark cursor is what a reconnecting
+  agent saves; typing a saved cursor shows only the events after it."
+  [graph alias-of]
+  (let [{:keys [cursor events]} (changes-since 0)]
+    [:section.changes-view {:data-show "$showingChanges"}
+     [:div.control-heading
+      [:span (str "Changes since · bookmark cursor " cursor)]
+      [:button {:type "button" :data-on:click "$showingChanges = false"} "Close"]]
+     [:label.cursor-field
+      [:span "Show events after cursor"]
+      [:input {:data-bind "changesCursor" :placeholder "0"}]]
+     (if (seq events)
+       [:ol.change-list (map #(change-row graph alias-of %) events)]
+       [:p.frontier-empty "No recorded events."])]))
 
 (defn main-view []
   (let [{:keys [graph notice]} @state
@@ -489,15 +532,19 @@
                                  [(:id node) (context-node-ids graph (:id node))]))
                        nodes)
         roots (set (:roots topology))
-        section-numbers (zipmap (:roots topology) (map inc (range)))]
-    [:main#app {:data-signals__ifmissing "{creatingRoot: false, showingModelView: false, graphFilter: ''}"}
+        alias-of (:id->alias (progress/aliases graph))
+        env {:graph graph :frontier frontier :contexts contexts
+             :alias-of alias-of
+             :current-work-ids
+             (set (map :id (:nodes (progress/current-work graph))))}]
+    [:main#app {:data-signals__ifmissing "{creatingRoot: false, showingModelView: false, showingChanges: false, changesCursor: '', graphFilter: ''}"}
      [:section.hero
       [:p.eyebrow "dj.ai.tooling / dev"]
       [:h1 "Progress graph builder"]
       [:p "Manually exercise the graph primitives. State lives only in this process."]]
      (when notice
        [:aside.notice {:data-level (name (:level notice))} (:message notice)])
-     (frontier-summary frontier)
+     (frontier-summary alias-of frontier)
      [:div {:data-show "$creatingRoot"} (root-form graph)]
      (synthesis-inbox graph)
      [:section.graph
@@ -505,6 +552,13 @@
        [:h2 "Topology"]
        [:div.heading-actions
         [:span (str (count nodes) (if (= 1 (count nodes)) " node" " nodes"))]
+        [:button.mode-switch {:type "button"
+                              :title "Show only the live frontier and its explanatory ancestry"
+                              :data-on:click "$graphFilter = 'current-work'"}
+         "Current work"]
+        [:button.mode-switch {:type "button"
+                              :data-on:click "$showingChanges = !$showingChanges"}
+         "Changes"]
         [:button.mode-switch {:type "button"
                               :data-on:click "$showingModelView = !$showingModelView"}
          "LLM view"]
@@ -516,6 +570,7 @@
         [:span "Raw LLM rendered view"]
         [:button {:type "button" :data-on:click "$showingModelView = false"} "Close"]]
        [:pre (view)]]
+      (changes-panel graph alias-of)
       [:div.filter-bar {:data-show "$graphFilter != ''"}
        [:span "Showing focused graph context"]
        [:button {:type "button" :data-on:click "$graphFilter = ''"} "Show all"]]
@@ -523,8 +578,7 @@
         [:div.node-list
          (map-indexed
           (fn [index node]
-            (node-card graph frontier contexts node
-                       (when (roots (:id node)) (section-numbers (:id node)))
+            (node-card env node (roots (:id node))
                        (:id (get nodes (dec index)))))
           nodes)]
         [:div.empty-state "The graph is empty. Add a root to begin."])]]))
@@ -569,7 +623,7 @@
   .rail[data-cell=rail]::before, .rail[data-cell=branch]::before { content: ''; position: absolute; left: var(--rail-x); top: calc(-1 * var(--row-gap)); bottom: calc(-1 * var(--row-gap)); border-left: 2px solid #484b53; }
   .rail[data-cell=branch]::after, .rail[data-cell=last-branch]::after { content: ''; position: absolute; left: var(--rail-x); right: -.05rem; top: calc(-1 * var(--row-gap)); height: calc(var(--row-gap) + 1rem); border-left: 2px solid #484b53; border-bottom: 2px solid #484b53; border-bottom-left-radius: .55rem; }
   .node-row[data-chain=true] .node-card::before { content: ''; position: absolute; left: 1.1rem; top: calc(-1 * var(--row-gap) - 1px); height: calc(var(--row-gap) + 1px); border-left: 2px solid #484b53; }
-  .node-heading { display: flex; align-items: center; gap: .5rem; } .sequence-number { display: inline-grid; place-items: center; min-width: 1.45rem; height: 1.45rem; padding: 0 .35rem; border-radius: 999px; background: #2a2c32; color: #c7c9ce; font-size: .7rem; font-weight: 800; }
+  .node-heading { display: flex; align-items: center; gap: .5rem; } .alias { display: inline-grid; place-items: center; min-width: 1.45rem; height: 1.45rem; padding: 0 .35rem; border-radius: 999px; background: #2a2c32; color: #c7c9ce; font-size: .7rem; font-weight: 800; }
   .node-card-actions { display: flex; align-items: center; gap: .35rem; }
   .edit-text, .add-node { border: 0; background: transparent; padding: .2rem .35rem; color: #a6a8ae; font-size: .72rem; }
   .node-card[data-kind=know] { border-left-color: #8fdda9; } .node-card[data-kind=done] { border-left-color: #6eafdf; } .node-card[data-kind=to-know] { border-left-color: #dbb167; } .node-card[data-kind=to-do] { border-left-color: #d77c7c; }
@@ -598,6 +652,14 @@
   .control-heading { display: flex; align-items: center; justify-content: space-between; color: #8ab4f8; font-size: .72rem; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; }
   .model-view { margin-bottom: 1rem; padding: .8rem; border: 1px solid #464c5c; border-radius: .65rem; background: #0b0c0e; }
   .model-view pre { margin: .7rem 0 0; color: #d6d8dc; font: .76rem/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .changes-view { margin-bottom: 1rem; padding: .8rem; border: 1px solid #464c5c; border-radius: .65rem; background: #0b0c0e; }
+  .cursor-field { display: flex; align-items: center; gap: .6rem; margin: .7rem 0 .4rem; color: #a6a8ae; font-size: .76rem; }
+  .cursor-field input { width: 7rem; background: #17181c; color: #e8e9eb; border-color: #464c5c; padding: .35rem .5rem; }
+  .change-list { margin: .4rem 0 0; padding: 0; list-style: none; display: grid; gap: .15rem; }
+  .change-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: .5rem; padding: .25rem .35rem; border-radius: .35rem; color: #caccd1; font: .76rem/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; }
+  .change-row:hover { background: #17181c; }
+  .change-cursor { color: #8ab4f8; } .change-op { color: #dbb167; text-transform: uppercase; font-size: .68rem; letter-spacing: .06em; }
+  .change-refs { overflow-wrap: anywhere; }
   .filter-bar { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: .65rem; padding: .55rem .7rem; border: 1px solid #464c5c; border-radius: .55rem; background: #181b22; color: #b6b9bf; font-size: .76rem; }
   .join { margin-top: .65rem; color: #a6a8ae; font-size: .75rem; } .join .field { margin-top: .5rem; }
   .complete-editor { display: grid; grid-template-columns: 1fr auto; gap: .45rem; margin-top: .7rem; } .complete-editor input { min-width: 0; }

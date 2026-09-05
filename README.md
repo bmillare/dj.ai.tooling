@@ -299,11 +299,18 @@ node, and clicking the node text again returns the card to its dense form.
 `New node` beside the node count reveals the root capture form; there is no
 global editing mode. `LLM view` shows the exact compact text returned by
 `progress-builder/view` so a human can inspect the model-facing projection.
+`Current work` applies the same lens as `current-work-view` in place: only the
+live frontier and its explanatory ancestry stay visible, and `Show all`
+returns to the full topology. `Changes` opens a delta panel listing every
+recorded event with its cursor; the panel header shows the bookmark cursor a
+reconnecting agent should save, and typing a saved cursor into the field
+filters to only the events after it, entirely client-side.
 
 The display groups each root with its complete spawn subtree even when a child
-is captured after a later root. Numbered root sections and extra spacing mark
-the major runs; linear chains stay flush, and indentation appears only where a
-parent forks. A spawn whose parent is directly above needs no annotation; when
+is captured after a later root. Every card leads with its canonical alias
+(`K19`, `Q6`, ...) — the same handle used by the LLM view, the nREPL write
+API, and the delta panel — and extra spacing marks the major runs; linear
+chains stay flush, and indentation appears only where a parent forks. A spawn whose parent is directly above needs no annotation; when
 a sibling subtree intervenes, a compact `from` line identifies the parent.
 Decorative curves are deliberately omitted because they cannot truthfully
 route an edge through a variable-height list.
@@ -344,3 +351,60 @@ for both resolver and targets. Bookmark the `:cursor` returned by
 `changes-since` and pass it on reconnect. A legacy graph with no event cursor
 returns its existing nodes as `:legacy-capture` events once; historical edits
 and resolutions cannot be reconstructed.
+
+### Reconnect tutorial (agents)
+
+A fresh session (or one whose context was cleared) reorients against a live
+builder in two reads and never needs the whole-graph dump. Everything below
+runs over the embedded nREPL, e.g. with `clj-nrepl-eval -p "$(<.nrepl-port)"`.
+
+1. **Identify yourself.** Writes are refused until the session declares who is
+   driving:
+
+   ```clojure
+   (dj.ai.tooling.progress-builder/identify!
+    {:actor :agent :session "ri-74"})
+   ```
+
+2. **Replay what changed while you were away.** Pass the cursor you saved last
+   session (your notes should always end with one; a first-ever connect uses
+   `0`):
+
+   ```clojure
+   (dj.ai.tooling.progress-builder/changes-since-view 57)
+   ;; CHANGES | since 57 | cursor 61
+   ;; [58] record K34: ... | by brent
+   ;; ...
+   ```
+
+   Each line is one write, tagged with its author and the node's canonical
+   alias. **Save the returned cursor** (`61` here) in your handoff notes; it is
+   the bookmark for the next reconnect. The same list, with the current
+   bookmark cursor in its header, is visible in the browser via `Changes`.
+
+3. **Orient on what is live.** After the delta, read the frontier with only
+   its explanatory ancestry:
+
+   ```clojure
+   (dj.ai.tooling.progress-builder/current-work-view)
+   ;; optionally {:author {:actor :agent}} to seed only agent-authored items
+   ```
+
+   This intentionally omits closed history and answers "what is open and
+   why" — it does not repeat what step 2 told you, and open Knows without live
+   descendants will not appear as seeds.
+
+4. **Write and resolve using aliases.** The aliases shown in both views are
+   canonical for the graph, so they are safe in prose and in write calls:
+
+   ```clojure
+   (dj.ai.tooling.progress-builder/record!
+    {:kind :know :body "..." :spawned-by #{"Q6"} :resolves #{"Q6"}})
+   (dj.ai.tooling.progress-builder/resolve! "K35" ["Q7"])
+   ```
+
+5. **Know the legacy boundary.** Graphs recorded before event cursors exist
+   expose their nodes once as `:legacy-capture` events (cursors `1..n` in
+   capture order); edits and resolutions from that era are not reconstructible.
+   Every write from the first authored cursor onward is fully
+   event-addressable.
