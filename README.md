@@ -306,6 +306,13 @@ recorded event with its cursor; the panel header shows the bookmark cursor a
 reconnecting agent should save, and typing a saved cursor into the field
 filters to only the events after it, entirely client-side.
 
+Lenses combine: the graph filter holds a set of tokens, and every
+`from` / `resolves` / `answered by` / `standing under` line on a card is a
+click target that adds that connection's context to the current view instead
+of replacing it. Following a resolution into a join like `K26` and then
+clicking its two `from` lines expands the visible context to both parents;
+`Show all` clears the accumulated set.
+
 The display groups each root with its complete spawn subtree even when a child
 is captured after a later root. Every card leads with its canonical alias
 (`K19`, `Q6`, ...) — the same handle used by the LLM view, the nREPL write

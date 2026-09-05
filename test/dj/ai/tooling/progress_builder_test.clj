@@ -141,7 +141,31 @@
       (is (str/includes? body "Current work"))
       (is (str/includes? body "$graphFilter = &apos;current-work&apos;"))
       ;; frontier item and its ancestry match the lens; closed history does not
-      (is (= 2 (count (re-seq #"\$graphFilter == &apos;current-work&apos;" body)))))))
+      (is (= 2 (count (re-seq #"includes\(&apos; current-work &apos;\)" body)))))))
+
+(deftest lineage-lines-expand-the-visible-context
+  (let [root (builder/record! {:kind :know :body "Shared parent"})
+        question (builder/record! {:kind :to-know :body "Question"
+                                   :spawned-by #{(:id root)}})]
+    ;; a sibling subtree forces a distant-parent `from` line on the join below
+    (builder/record! {:kind :know :body "Sibling" :spawned-by #{(:id root)}})
+    (builder/record! {:kind :know :body "Joined answer"
+                      :spawned-by #{(:id root) (:id question)}
+                      :resolves #{(:id question)}})
+    (let [body (:body (builder/app {:request-method :get :uri "/"}))]
+      ;; from/resolves/answered-by lines are buttons that ADD a context token
+      (is (str/includes? body (str "<button class=\"from-line\"")))
+      (is (str/includes? body (str "<button class=\"resolve-line\"")))
+      (is (str/includes? body (str "<button class=\"resolved-by-line\"")))
+      (is (str/includes?
+           body
+           (str "$graphFilter = ($graphFilter ? $graphFilter + &apos; &apos; : &apos;&apos;) + &apos;context:"
+                (:id question))))
+      ;; visibility clauses test membership in the token set, so lenses combine
+      (is (str/includes?
+           body
+           (str "(&apos; &apos;+$graphFilter+&apos; &apos;).includes(&apos; context:"
+                (:id root) " &apos;)"))))))
 
 (deftest changes-panel-filters-on-a-client-side-cursor
   (let [first-node (builder/record! {:kind :know :body "First change"})
@@ -202,7 +226,7 @@
                                 :spawned-by #{(:id question)}})
         unrelated (builder/record! {:kind :know :body "Unrelated root"})
         body (:body (builder/app {:request-method :get :uri "/"}))
-        context-filter (str "$graphFilter == &apos;context:" (:id question) "&apos;")]
+        context-filter (str "includes(&apos; context:" (:id question) " &apos;)")]
     (is (str/includes? body "class=\"status context-filter\""))
     (is (str/includes? body "Show this item in its graph context"))
     (is (str/includes? body "data-chain=\"true\""))

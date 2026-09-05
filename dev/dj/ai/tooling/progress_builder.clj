@@ -286,6 +286,18 @@
         (concat (map :id (progress/ancestors graph focus-id))
                 (map :id (progress/children graph focus-id)))))
 
+(defn- filter-clause
+  "Token membership in the space-separated $graphFilter set, so lenses can be
+  combined: clicking a connection adds its context token instead of replacing
+  the current one."
+  [token]
+  (str " || (' '+$graphFilter+' ').includes(' " token " ')"))
+
+(defn- expand-filter-action
+  "Click expression that adds one filter token to the active set."
+  [token]
+  (str "$graphFilter = ($graphFilter ? $graphFilter + ' ' : '') + '" token "'"))
+
 (defn- filter-expression [graph node frontier contexts current-work-ids]
   (let [node-id (:id node)
         question-ids (set (map :id (:to-knows frontier)))
@@ -293,19 +305,19 @@
         synthesis-ids (set (map :id (:unsynthesized-dones frontier)))
         resolution-targets (set (mapcat :resolves (ordered-nodes graph)))]
     (str "$graphFilter == ''"
-         (when (question-ids node-id) " || $graphFilter == 'questions'")
-         (when (action-ids node-id) " || $graphFilter == 'actions'")
-         (when (synthesis-ids node-id) " || $graphFilter == 'synthesis'")
-         (when (current-work-ids node-id) " || $graphFilter == 'current-work'")
+         (when (question-ids node-id) (filter-clause "questions"))
+         (when (action-ids node-id) (filter-clause "actions"))
+         (when (synthesis-ids node-id) (filter-clause "synthesis"))
+         (when (current-work-ids node-id) (filter-clause "current-work"))
          (when (resolution-targets node-id)
-           (str " || $graphFilter == 'resolution:" node-id "'"))
+           (filter-clause (str "resolution:" node-id)))
          (apply str
                 (for [target-id (:resolves node)]
-                  (str " || $graphFilter == 'resolution:" target-id "'")))
+                  (filter-clause (str "resolution:" target-id))))
          (apply str
                 (for [[focus-id context-ids] contexts
                       :when (context-ids node-id)]
-                  (str " || $graphFilter == 'context:" focus-id "'"))))))
+                  (filter-clause (str "context:" focus-id)))))))
 
 (defn- node-card [{:keys [graph frontier contexts current-work-ids alias-of]}
                   node section-start? previous-id]
@@ -379,20 +391,32 @@
       (when (seq distant-parents)
         [:div.lineage
          (for [parent-id distant-parents]
-           [:div.from-line [:span "from"] (aliased-body graph alias-of parent-id)])])
+           [:button.from-line
+            {:type "button" :title "Add this parent's context to the view"
+             :data-on:click__stop (expand-filter-action (str "context:" parent-id))}
+            [:span "from"] (aliased-body graph alias-of parent-id)])])
       (when (seq (:resolves node))
         [:div.lineage
          (for [target-id (:resolves node)]
-           [:div.resolve-line [:span "resolves"]
+           [:button.resolve-line
+            {:type "button" :title "Add the resolved item's context to the view"
+             :data-on:click__stop (expand-filter-action (str "context:" target-id))}
+            [:span "resolves"]
             (aliased-body graph alias-of target-id)])])
       (when-let [resolvers (seq (progress/resolved-by graph node-id))]
         [:div.lineage
          (for [resolver resolvers]
-           [:div.resolved-by-line
+           [:button.resolved-by-line
+            {:type "button" :title "Add the resolver's context to the view"
+             :data-on:click__stop (expand-filter-action
+                                   (str "context:" (:id resolver)))}
             [:span (if (= :to-know (:kind node)) "answered by" "completed by")]
             (aliased-body graph alias-of (:id resolver))])])
       (when-let [pinned-under (:pinned-under node)]
-        [:div.pin-line "standing under " (aliased-body graph alias-of pinned-under)])
+        [:button.pin-line
+         {:type "button" :title "Add the standing node's context to the view"
+          :data-on:click__stop (expand-filter-action (str "context:" pinned-under))}
+         "standing under " (aliased-body graph alias-of pinned-under)])
       (when (progress/synthesis-pending? graph node-id)
         [:div.synthesis-badge "Awaiting synthesis"])]
      [:div.node-controls {:data-show (str "$" editing)}
@@ -634,10 +658,12 @@
   .status[data-status=blocked], .status[data-status=cancelled] { color: #e6a1a1; } .body { font-size: 1.05rem; margin: .8rem 0 .45rem; white-space: pre-wrap; }
   .id { display: block; color: #75787f; font-size: .68rem; overflow-wrap: anywhere; margin: .55rem 0; }
   .edges { color: #a6a8ae; font-size: .75rem; margin-top: .25rem; } .edges span { color: #75787f; margin-right: .45rem; }
-  .lineage { margin: .5rem 0; display: grid; gap: .25rem; } .from-line, .resolve-line { position: relative; color: #a6a8ae; font-size: .72rem; padding-left: 1rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .lineage { margin: .5rem 0; display: grid; gap: .25rem; } .from-line, .resolve-line { position: relative; color: #a6a8ae; font-size: .72rem; padding: 0 0 0 1rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .from-line, .resolve-line, .resolved-by-line, .pin-line { border: 0; background: transparent; width: 100%; text-align: left; cursor: pointer; }
+  .from-line:hover, .resolve-line:hover, .resolved-by-line:hover, .pin-line:hover { color: #fff; }
   .from-line:before, .resolve-line:before, .resolved-by-line:before { content: ''; position: absolute; left: 0; top: .55em; width: .7rem; border-top: 2px dashed #6eafdf; } .from-line:before { border-color: #8fdda9; } .from-line span, .resolve-line span, .resolved-by-line span { color: #75787f; margin-right: .35rem; }
-  .resolved-by-line { position: relative; color: #a6a8ae; font-size: .72rem; padding-left: 1rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .pin-line, .synthesis-badge { color: #8ab4f8; font-size: .72rem; margin: .4rem 0; } .synthesis-badge { color: #dbb167; }
+  .resolved-by-line { position: relative; color: #a6a8ae; font-size: .72rem; padding: 0 0 0 1rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pin-line, .synthesis-badge { color: #8ab4f8; font-size: .72rem; margin: .4rem 0; padding: 0; } .synthesis-badge { color: #dbb167; }
   .inspector { color: #75787f; font-size: .72rem; margin: .5rem 0; } .inspector summary, .join summary { cursor: pointer; }
   .local-editor { border-top: 1px solid #2b2d33; padding-top: .75rem; margin-top: .75rem; } .local-editor textarea { background: #f7f8fa; min-height: 6rem; }
   .body-editor { display: grid; grid-template-columns: 1fr auto; align-items: end; gap: .45rem; margin-top: .65rem; }
