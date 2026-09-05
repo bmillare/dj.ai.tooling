@@ -54,6 +54,15 @@
     (subscribed/mark-dirty! subscriptions)
     (some #(when (= (:id value) (:id %)) %) (:nodes (topology)))))
 
+(defn resolve!
+  "Links an existing resolver (Done -> To Do, Know -> To Know) to existing
+  targets after the fact and closes them. Intended for direct use through the
+  embedded nREPL alongside `record!`."
+  [resolver-id target-ids]
+  (transact! #(update % :graph progress/resolve resolver-id target-ids))
+  (subscribed/mark-dirty! subscriptions)
+  (some #(when (= resolver-id (:id %)) %) (:nodes (topology))))
+
 (def ^:private kind-labels
   {:done "Done" :know "Know" :to-know "To know" :to-do "To do"})
 
@@ -164,7 +173,11 @@
         done-note (signal-name "doneNote" node-id)
         body-draft (signal-name "bodyDraft" node-id)
         editing (signal-name "editing" node-id)
-        nodes (remove #(= node-id (:id %)) (ordered-nodes graph))]
+        resolve-existing (signal-name "resolveExisting" node-id)
+        nodes (remove #(= node-id (:id %)) (ordered-nodes graph))
+        resolvable (filterv #(and (compatible-target? (:kind node) %)
+                                  (#{:open :blocked} (:status %)))
+                            nodes)]
     [:div.node-row {:data-section-start (when section-number "true")
                     :data-chain (when (and previous-id
                                            (contains? (:spawned-by node) previous-id)
@@ -180,7 +193,8 @@
                           (str "{" draft ": '', " also-from ": '', "
                                resolves ": '', " artifact ": '', " standing
                                ": false, " done-note ": '', " body-draft ": "
-                               (pr-str (:body node)) ", " editing ": false}")}
+                               (pr-str (:body node)) ", " editing ": false, "
+                               resolve-existing ": ''}")}
      [:div.node-content
       [:header
        [:div.node-heading
@@ -265,6 +279,21 @@
           [:label.check-field
            [:input {:type "checkbox" :data-bind standing}]
            [:span "Standing Know under this node"]]])]
+      (when (seq resolvable)
+        [:div.resolve-existing
+         [:div.composer-label
+          (if (= :know (:kind node))
+            "This Know answers an existing To Know"
+            "This Done completes an existing To Do")]
+         [:div.resolve-row
+          [:select {:data-bind resolve-existing}
+           [:option {:value ""} "Choose an open item…"]
+           (map option resolvable)]
+          [:button.primary
+           {:type "button"
+            :data-on:click (str "@post('/resolve-existing?node=" node-id
+                                "'); $" resolve-existing " = ''")}
+           "Link resolution"]]])
       (when (and (= :to-do (:kind node)) (#{:open :blocked} (:status node)))
         [:div.complete-editor
          [:input {:data-bind done-note :placeholder "Optional completion note"}]
@@ -433,6 +462,7 @@
   .filter-bar { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: .65rem; padding: .55rem .7rem; border: 1px solid #464c5c; border-radius: .55rem; background: #181b22; color: #b6b9bf; font-size: .76rem; }
   .join { margin-top: .65rem; color: #a6a8ae; font-size: .75rem; } .join .field { margin-top: .5rem; }
   .complete-editor { display: grid; grid-template-columns: 1fr auto; gap: .45rem; margin-top: .7rem; } .complete-editor input { min-width: 0; }
+  .resolve-existing { border-top: 1px solid #2b2d33; margin-top: .7rem; padding-top: .6rem; } .resolve-row { display: grid; grid-template-columns: 1fr auto; gap: .45rem; } .resolve-row select { min-width: 0; }
   .inbox-item { display: flex; justify-content: space-between; gap: 1rem; align-items: center; padding: .8rem; border: 1px solid #4b4029; background: #211d15; border-radius: .65rem; margin-bottom: .5rem; }
   .status-actions { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .8rem; } .status-actions button { font-size: .72rem; padding: .35rem .5rem; }
   .empty-state { border: 1px dashed #45484f; border-radius: .75rem; padding: 3rem 1rem; text-align: center; color: #84878e; }
@@ -519,6 +549,17 @@
                   (keyword (signal-name "bodyDraft" node-id)))]
     (commit! #(progress/edit-body % node-id body) "Node text updated.")))
 
+(defn- resolve-existing! [request]
+  (let [node-id (get-in request [:query-params "node"])
+        target (present (get (fused/signals request)
+                             (keyword (signal-name "resolveExisting" node-id))))]
+    (if target
+      (commit! #(progress/resolve % node-id [target]) "Resolution linked.")
+      (do (transact! #(assoc % :notice {:level :error
+                                        :message "Choose the item this node resolves."}))
+          (subscribed/mark-dirty! subscriptions)
+          {:status 204}))))
+
 (defn- set-status! [request]
   (let [node-id (get-in request [:query-params "node"])
         status (some #(when (= (get-in request [:query-params "status"]) (name %)) %)
@@ -535,6 +576,7 @@
     [:post "/complete"] (complete! request)
     [:post "/edit-body"] (edit-body! request)
     [:post "/nothing-learned"] (nothing-learned! request)
+    [:post "/resolve-existing"] (resolve-existing! request)
     [:post "/set-status"] (set-status! request)
     response/not-found))
 

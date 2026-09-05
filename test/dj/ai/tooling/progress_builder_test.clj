@@ -237,3 +237,30 @@
       (is (= {:port 45678}
              (#'builder/write-nrepl-port! {:port 45678}))))
     (is (= [".nrepl-port" "45678"] @written))))
+
+(deftest resolve-existing-links-nodes-after-the-fact
+  (add-root "to-know" "Open question?")
+  (add-root "know" "The answer")
+  (let [[q-id k-id] (get-in @builder/state [:graph :order])
+        page (:body (builder/app {:request-method :get :uri "/"}))
+        signal (signal-id "resolveExisting" k-id)]
+    (is (str/includes? page "This Know answers an existing To Know"))
+    (is (str/includes? page "/resolve-existing?node="))
+    (is (= 204 (:status (builder/app
+                         (post-request "/resolve-existing" {"node" k-id}
+                                       (str "{\"" signal "\":\"" q-id "\"}"))))))
+    (is (= :closed (get-in @builder/state [:graph :nodes q-id :status])))
+    (is (contains? (get-in @builder/state [:graph :nodes k-id :resolves]) q-id))
+    (is (= :success (get-in @builder/state [:notice :level])))
+    (is (= 204 (:status (builder/app
+                         (post-request "/resolve-existing" {"node" k-id}
+                                       (str "{\"" signal "\":\"\"}"))))))
+    (is (= :error (get-in @builder/state [:notice :level])))))
+
+(deftest repl-resolve!-links-existing-nodes
+  (let [question (builder/record! {:kind :to-know :body "Linked later?"})
+        answer (builder/record! {:kind :know :body "Yes, after the fact."})]
+    (builder/resolve! (:id answer) [(:id question)])
+    (is (= :closed (get-in @builder/state [:graph :nodes (:id question) :status])))
+    (is (= [(:id answer)]
+           (get-in @builder/state [:graph :resolved-by (:id question)])))))
