@@ -9,6 +9,7 @@
 (defn reset-state [test-fn]
   @(recorder/patch! builder/state
                     (recorder.patch/->Replace builder/initial-state))
+  (builder/identify! {:actor :agent :session "test"})
   (test-fn))
 
 (use-fixtures :each reset-state)
@@ -264,3 +265,30 @@
     (is (= :closed (get-in @builder/state [:graph :nodes (:id question) :status])))
     (is (= [(:id answer)]
            (get-in @builder/state [:graph :resolved-by (:id question)])))))
+
+(deftest writes-carry-authorship-into-nodes-events-and-bylines
+  (let [recorded (builder/record! {:kind :know :body "Signed by the agent."})]
+    (is (= {:actor :agent :session "test"} (:author recorded)))
+    (is (= {:actor :agent :session "test"}
+           (get-in @builder/state [:last-event :author])))
+    (is (= :record (get-in @builder/state [:last-event :op]))))
+  (add-root "to-know" "Signed by Brent?")
+  (let [ui-node-id (last (get-in @builder/state [:graph :order]))
+        page (:body (builder/app {:request-method :get :uri "/"}))]
+    (is (= {:actor :brent}
+           (get-in @builder/state [:graph :nodes ui-node-id :author])))
+    (is (= {:actor :brent} (get-in @builder/state [:last-event :author])))
+    (is (str/includes? page "~agent/test"))
+    (is (str/includes? page "~brent"))))
+
+(deftest unidentified-nrepl-writes-are-refused
+  (reset! @#'builder/repl-author nil)
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Identify yourself"
+                        (builder/record! {:kind :know :body "Anonymous."})))
+  (let [signed (builder/record! {:kind :to-know :body "Explicit author works."
+                                 :author {:actor :brent}})]
+    (is (= {:actor :brent} (:author signed)))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Identify yourself"
+                          (builder/resolve! (:id signed) []))))
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"keyword"
+                        (builder/identify! {:actor "brent"}))))

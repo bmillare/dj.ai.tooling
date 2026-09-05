@@ -32,6 +32,36 @@
   @(recorder/tx! state (fn [current]
                          (recorder.patch/->Replace (f current)))))
 
+(def ^:private ui-author
+  "The dev UI is a single-human surface, so browser writes default to Brent.
+  nREPL writes must self-identify instead (see `identify!`)."
+  {:actor :brent})
+
+(defonce ^:private repl-author (atom nil))
+
+(defn identify!
+  "Declares who is driving this nREPL session, e.g.
+  (identify! {:actor :agent :session \"ri-67\"}). Required once before
+  `record!`/`resolve!`; each write stamps this identity so human and agent
+  foci stay distinguishable in the graph and the recorder log."
+  [author]
+  (when-not (progress/valid-author? author)
+    (throw (ex-info "Author must be {:actor <keyword>} with optional string :session."
+                    {:author author})))
+  (reset! repl-author author))
+
+(defn- repl-author! []
+  (or @repl-author
+      (throw (ex-info (str "Identify yourself before writing, e.g. "
+                           "(identify! {:actor :agent :session \"ri-67\"}).")
+                      {:type :unidentified-author}))))
+
+(defn- author-event
+  "Stamps write provenance onto the builder state. The recorder log persists
+  every transaction, so this yields per-event authorship for free."
+  [current author op]
+  (assoc current :last-event {:author author :op op :at (java.util.Date.)}))
+
 (defn topology
   "Returns the agent-facing projection of the live graph without exposing its
   storage shape. Intended for direct use through the embedded nREPL."
@@ -45,23 +75,31 @@
 
 (defn record!
   "Records a node in the live graph and returns its topology projection.
-  Generates process concerns (id and timestamp) when callers omit them."
+  Generates process concerns (id and timestamp) when callers omit them, and
+  stamps the identity declared via `identify!` unless :author is supplied."
   [value]
-  (let [value (merge {:id (str (random-uuid))
-                      :created-at (java.util.Date.)}
+  (let [author (or (:author value) (repl-author!))
+        value (merge {:id (str (random-uuid))
+                      :created-at (java.util.Date.)
+                      :author author}
                      value)]
-    (transact! #(update % :graph progress/add-node value))
+    (transact! #(-> %
+                    (update :graph progress/add-node value)
+                    (author-event author :record)))
     (subscribed/mark-dirty! subscriptions)
     (some #(when (= (:id value) (:id %)) %) (:nodes (topology)))))
 
 (defn resolve!
   "Links an existing resolver (Done -> To Do, Know -> To Know) to existing
   targets after the fact and closes them. Intended for direct use through the
-  embedded nREPL alongside `record!`."
+  embedded nREPL alongside `record!`; requires `identify!` first."
   [resolver-id target-ids]
-  (transact! #(update % :graph progress/resolve resolver-id target-ids))
-  (subscribed/mark-dirty! subscriptions)
-  (some #(when (= resolver-id (:id %)) %) (:nodes (topology))))
+  (let [author (repl-author!)]
+    (transact! #(-> %
+                    (update :graph progress/resolve resolver-id target-ids)
+                    (author-event author :resolve)))
+    (subscribed/mark-dirty! subscriptions)
+    (some #(when (= resolver-id (:id %)) %) (:nodes (topology)))))
 
 (def ^:private kind-labels
   {:done "Done" :know "Know" :to-know "To know" :to-do "To do"})
@@ -199,7 +237,9 @@
       [:header
        [:div.node-heading
         (when section-number [:span.sequence-number section-number])
-        [:span.kind (get kind-labels (:kind node))]]
+        [:span.kind (get kind-labels (:kind node))]
+        (when-let [author (:author node)]
+          [:span.byline (str "~" (progress/author-label author))])]
        [:div.node-card-actions
         (when (progress/agenda? node)
           (let [resolved? (and (= :closed (:status node))
@@ -436,6 +476,7 @@
   .edit-text, .add-node { border: 0; background: transparent; padding: .2rem .35rem; color: #a6a8ae; font-size: .72rem; }
   .node-card[data-kind=know] { border-left-color: #8fdda9; } .node-card[data-kind=done] { border-left-color: #6eafdf; } .node-card[data-kind=to-know] { border-left-color: #dbb167; } .node-card[data-kind=to-do] { border-left-color: #d77c7c; }
   .kind { font-size: .75rem; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; } .status { color: #a6a8ae; font-size: .75rem; }
+  .byline { color: #75787f; font-size: .7rem; font-weight: 600; }
   .resolution-filter { border: 0; background: transparent; padding: .2rem .35rem; text-decoration: underline; text-decoration-color: #54575e; text-underline-offset: .2rem; }
   .context-filter { border: 0; background: transparent; padding: .2rem .35rem; text-decoration: underline; text-decoration-color: #54575e; text-underline-offset: .2rem; }
   .status[data-status=blocked], .status[data-status=cancelled] { color: #e6a1a1; } .body { font-size: 1.05rem; margin: .8rem 0 .45rem; white-space: pre-wrap; }
@@ -488,16 +529,18 @@
 (defn- commit! [update-fn success-message]
   (try
     (transact! (fn [{:keys [graph] :as current}]
-                 (assoc current
-                        :graph (update-fn graph)
-                        :notice {:level :success :message success-message})))
+                 (-> current
+                     (assoc :graph (update-fn graph)
+                            :notice {:level :success :message success-message})
+                     (author-event ui-author :ui))))
     (catch clojure.lang.ExceptionInfo error
       (transact! #(assoc % :notice {:level :error :message (ex-message error)}))))
   (subscribed/mark-dirty! subscriptions)
   {:status 204})
 
 (defn- node-value [kind body]
-  {:id (str (random-uuid)) :kind kind :body body :created-at (java.util.Date.)})
+  {:id (str (random-uuid)) :kind kind :body body
+   :created-at (java.util.Date.) :author ui-author})
 
 (defn- add-root! [request]
   (let [{:keys [rootBody rootResolvesId rootPinnedUnder rootArtifact]}
@@ -505,8 +548,7 @@
         kind (parse-kind (get-in request [:query-params "kind"]))
         resolves-id (present rootResolvesId)
         pinned-under (present rootPinnedUnder)
-        node-id (str (random-uuid))
-        value (cond-> {:id node-id :kind kind :body rootBody :created-at (java.util.Date.)}
+        value (cond-> (node-value kind rootBody)
                 resolves-id (assoc :resolves #{resolves-id})
                 pinned-under (assoc :pinned-under pinned-under)
                 (present rootArtifact) (assoc :artifacts [{:kind :reference
@@ -535,7 +577,8 @@
         note (get signals (keyword (signal-name "doneNote" node-id)))]
     (commit! #(progress/complete % node-id
                                   {:id (str (random-uuid)) :body note
-                                   :created-at (java.util.Date.)})
+                                   :created-at (java.util.Date.)
+                                   :author ui-author})
              "Done recorded.")))
 
 (defn- nothing-learned! [request]

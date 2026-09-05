@@ -68,9 +68,22 @@
             {:resolver-id (:id resolver) :target-id target-id
              :target-status (:status target)}))))
 
+(defn valid-author?
+  "Authorship identifies a creating focus: a keyword :actor plus an optional
+  string :session distinguishing parallel foci of the same actor."
+  [author]
+  (and (map? author)
+       (keyword? (:actor author))
+       (or (nil? (:session author)) (string? (:session author)))))
+
+(defn- validate-author [node-id author]
+  (when-not (valid-author? author)
+    (fail ":author must be a map of a keyword :actor and optional string :session."
+          {:node-id node-id :author author})))
+
 (defn- validate-new-node [graph value]
   (let [{:keys [id kind body status spawned-by resolves pinned-under
-                created-at nothing-learned?]} value]
+                created-at nothing-learned? author]} value]
     (when (nil? id) (fail "Progress node requires :id." {:node value}))
     (when (node graph id)
       (fail "Progress node id already exists." {:node-id id}))
@@ -95,7 +108,9 @@
     (when (and (contains? value :nothing-learned?)
                (or (not= :done kind) (not (boolean? nothing-learned?))))
       (fail ":nothing-learned? is a boolean available only on Done nodes."
-            {:node-id id :kind kind :nothing-learned? nothing-learned?}))))
+            {:node-id id :kind kind :nothing-learned? nothing-learned?}))
+    (when (contains? value :author)
+      (validate-author id author))))
 
 (defn add-node
   "Adds one fully identified node and returns a new graph. Collection fields
@@ -329,6 +344,12 @@
                 (:order graph))
    :frontier (frontier graph)})
 
+(defn author-label
+  "Compact display form of a node's :author, e.g. \"brent\" or \"agent/ri-67\".
+  Authors identify creation foci (actor + session), never audiences."
+  [{:keys [actor session]}]
+  (str (name actor) (when session (str "/" session))))
+
 (def ^:private render-kind
   {:done ["D" "DONE"]
    :know ["K" "KNOW"]
@@ -436,7 +457,7 @@
                      " | actions: " (or (not-empty (alias-list aliases (frontier-ids :to-dos))) "none")
                      " | synthesis: " (or (not-empty (alias-list aliases (frontier-ids :unsynthesized-dones))) "none"))
         render-node
-        (fn [{:keys [id kind body status spawned-by resolves resolved-by pinned-under artifacts gutter]}]
+        (fn [{:keys [id kind body status spawned-by resolves resolved-by pinned-under artifacts gutter author]}]
           (let [[_ label] (render-kind kind)
                 prefix (gutter-prefix gutter)
                 continuation (gutter-prefix (map gutter-continuation gutter))
@@ -452,9 +473,10 @@
                                (str/upper-case (name status)))))
                 pin (when pinned-under (str " | pinned under " (aliases pinned-under)))
                 refs (when (seq artifacts)
-                       (str " | refs " (str/join ", " (map :ref artifacts))))]
+                       (str " | refs " (str/join ", " (map :ref artifacts))))
+                byline (when author (str " | by " (author-label author)))]
             (str prefix "[" (aliases id) "] " label ": " body
-                 joins resolution state pin refs)))]
+                 joins resolution state pin refs byline)))]
     (str summary
          (when (seq nodes) "\n\n")
          (str/join "\n" (map render-node display-nodes)))))

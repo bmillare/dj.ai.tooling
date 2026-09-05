@@ -68,6 +68,27 @@
                                               :nothing-learned? true
                                               :created-at at})))))
 
+(deftest authorship-is-optional-validated-and-rendered
+  (let [at #inst "2026-09-04"
+        graph (-> (progress/empty-graph)
+                  (progress/add-node {:id :q :kind :to-know :body "Who wrote this?"
+                                      :author {:actor :brent} :created-at at})
+                  (progress/add-node {:id :k :kind :know :body "The agent did."
+                                      :spawned-by #{:q} :resolves #{:q}
+                                      :author {:actor :agent :session "ri-67"}
+                                      :created-at at})
+                  (add :legacy :know "Unattributed history stays legal." [] 2))
+        rendered (progress/render-topology (progress/topology graph))]
+    (is (= {:actor :agent :session "ri-67"} (:author (progress/node graph :k))))
+    (is (str/includes? rendered " | by brent"))
+    (is (str/includes? rendered " | by agent/ri-67"))
+    (is (not (str/includes? (last (str/split-lines rendered)) " | by "))))
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #":author"
+                        (progress/add-node (progress/empty-graph)
+                                           {:id :x :kind :know :body "Bad"
+                                            :author {:name "brent"}
+                                            :created-at #inst "2026-09-04"}))))
+
 (deftest traverses-a-joining-graph
   (let [graph (-> (progress/empty-graph)
                   (add :root :know "Root" [] 0)
