@@ -275,7 +275,8 @@ The dev-only graph builder manually exercises the progress core with a
 nix develop --command clojure -M:graph-builder
 ```
 
-Open `http://localhost:9090` (or set `PORT`). The UI uses dj.web's
+The server listens on `0.0.0.0`; open `http://localhost:9090` locally (or set
+`PORT`). The UI uses dj.web's
 current-state Datastar shape: commands durably commit graph state and return `204`, one
 long-lived subscription re-renders the full `<main>`, and browser signals hold
 only form drafts. The topology-first surface supports separate root creation,

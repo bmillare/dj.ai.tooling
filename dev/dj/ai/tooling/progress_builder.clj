@@ -531,13 +531,13 @@
 
 (defn -main [& _]
   (let [port (parse-long (or (System/getenv "PORT") "9090"))
-        server (http/start! #'app {:port port})
+        server (http/start! #'app {:host "0.0.0.0" :port port})
         repl (write-nrepl-port! (nrepl/start-server :bind "127.0.0.1" :port 0))]
     (.addShutdownHook
      (Runtime/getRuntime)
      (Thread. #(do (http/stop! server)
                    (recorder/close! state)
                    (nrepl/stop-server repl))))
-    (println (str "progress graph builder: http://localhost:" (http/port server)))
+    (println (str "progress graph builder: http://0.0.0.0:" (http/port server)))
     (println (str "nREPL server: 127.0.0.1:" (:port repl) " (.nrepl-port)"))
     @(promise)))
