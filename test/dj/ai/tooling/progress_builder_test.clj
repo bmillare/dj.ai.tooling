@@ -281,6 +281,17 @@
     (is (str/includes? page "~agent/test"))
     (is (str/includes? page "~brent"))))
 
+(deftest attribute!-backfills-authorship-on-existing-nodes
+  (let [node (builder/record! {:kind :know :body "Legacy node."
+                               :author {:actor :agent}})
+        updated (builder/attribute! (:id node) {:actor :brent})]
+    (is (= {:actor :brent} (:author updated)))
+    (is (= {:actor :brent}
+           (get-in @builder/state [:graph :nodes (:id node) :author])))
+    (is (= :attribute (get-in @builder/state [:last-event :op])))
+    (is (= {:actor :agent :session "test"}
+           (get-in @builder/state [:last-event :author])))))
+
 (deftest unidentified-nrepl-writes-are-refused
   (reset! @#'builder/repl-author nil)
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Identify yourself"

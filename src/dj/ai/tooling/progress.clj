@@ -190,6 +190,14 @@
           {:node-id node-id :body body}))
   (assoc-in graph [:nodes node-id :body] body))
 
+(defn set-author
+  "Attributes a node to a creating focus after the fact. Meant for restoring
+  known provenance from records (logs, session history), not for guessing."
+  [graph node-id author]
+  (require-node graph node-id :attribution-target)
+  (validate-author node-id author)
+  (assoc-in graph [:nodes node-id :author] author))
+
 (defn attach-artifact [graph node-id artifact]
   (require-node graph node-id :artifact-target)
   (update-in graph [:nodes node-id :artifacts] (fnil conj []) artifact))

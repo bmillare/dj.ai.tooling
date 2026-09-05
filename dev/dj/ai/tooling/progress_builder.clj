@@ -101,6 +101,19 @@
     (subscribed/mark-dirty! subscriptions)
     (some #(when (= resolver-id (:id %)) %) (:nodes (topology)))))
 
+(defn attribute!
+  "Backfills known provenance onto an existing node, e.g.
+  (attribute! id {:actor :brent}). The attribution itself is a write, so
+  `identify!` is still required; use only for authorship recorded elsewhere
+  (logs, session history), never guesses."
+  [node-id author]
+  (let [event-author (repl-author!)]
+    (transact! #(-> %
+                    (update :graph progress/set-author node-id author)
+                    (author-event event-author :attribute)))
+    (subscribed/mark-dirty! subscriptions)
+    (some #(when (= node-id (:id %)) %) (:nodes (topology)))))
+
 (def ^:private kind-labels
   {:done "Done" :know "Know" :to-know "To know" :to-do "To do"})
 

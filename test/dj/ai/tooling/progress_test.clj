@@ -89,6 +89,16 @@
                                             :author {:name "brent"}
                                             :created-at #inst "2026-09-04"}))))
 
+(deftest set-author-backfills-known-provenance
+  (let [graph (-> (progress/empty-graph)
+                  (add :legacy :know "Written before authorship existed." [] 0)
+                  (progress/set-author :legacy {:actor :brent}))]
+    (is (= {:actor :brent} (:author (progress/node graph :legacy))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #":author"
+                          (progress/set-author graph :legacy {:actor "brent"})))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"does not exist"
+                          (progress/set-author graph :missing {:actor :brent})))))
+
 (deftest traverses-a-joining-graph
   (let [graph (-> (progress/empty-graph)
                   (add :root :know "Root" [] 0)
