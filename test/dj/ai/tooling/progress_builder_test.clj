@@ -101,9 +101,24 @@
 (deftest node-local-authoring-resets-draft-and-renders-vertical-depth
   (add-root "know" "Root")
   (let [body (:body (builder/app {:request-method :get :uri "/"}))]
-    (is (str/includes? body "await @post"))
+    (is (str/includes? body "@post"))
+    (is (not (str/includes? body "await @post")))
     (is (str/includes? body "; $draft_"))
     (is (str/includes? body "--depth:0"))))
+
+(deftest done-can-spawn-know-containing-punctuation
+  (add-root "done" "Discussed graph usage")
+  (let [done-id (first (get-in @builder/state [:graph :order]))
+        draft-key (signal-id "draft" done-id)
+        body "- we probably need a compressed \"view mdoe\" view without UI so it's easier to visually consume"
+        response (builder/app
+                  (post-request "/spawn" {"parent" done-id "kind" "know"}
+                                (str "{\"" draft-key "\":" (pr-str body) "}")))
+        graph (:graph @builder/state)
+        know (get-in graph [:nodes (last (:order graph))])]
+    (is (= 204 (:status response)))
+    (is (= body (:body know)))
+    (is (= #{done-id} (:spawned-by know)))))
 
 (deftest nrepl-port-file-reflects-server-port
   (let [written (atom nil)]

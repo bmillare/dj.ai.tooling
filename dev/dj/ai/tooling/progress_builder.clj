@@ -144,7 +144,7 @@
       [:div.kind-actions
        (for [kind [:done :know :to-know :to-do]]
          [:button {:type "button" :data-kind (name kind)
-                   :data-on:click (str "await @post('/spawn?parent=" node-id
+                   :data-on:click (str "@post('/spawn?parent=" node-id
                                        "&kind=" (name kind) "'); $" draft " = ''")}
           (get kind-labels kind)])]
       (when (seq nodes)
