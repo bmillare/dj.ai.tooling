@@ -321,6 +321,22 @@
     (is (empty? (get-in agent-work [:frontier :to-dos])))
     (is (= {:actor :brent} (:author (first (:nodes agent-work)))))))
 
+(deftest current-work-preserves-answered-status-when-resolver-is-projected-out
+  (let [graph (-> (progress/empty-graph)
+                  (add :answered-q :to-know "Original question?" [] 0)
+                  (add :answer :know "The answer" [:answered-q] 1)
+                  (progress/resolve :answer [:answered-q])
+                  (add :follow-up :to-know "Follow-up?" [:answered-q] 2))
+        work (progress/current-work graph)
+        by-id (into {} (map (juxt :id identity)) (:nodes work))]
+    ;; :answer has no live descendants, so it drops out of current work, but
+    ;; :answered-q must still read as answered rather than closed-unanswered.
+    (is (= [:answered-q :follow-up] (mapv :id (:nodes work))))
+    (is (empty? (:resolved-by (by-id :answered-q))))
+    (is (:resolved? (by-id :answered-q)))
+    (is (str/includes? (progress/render-topology work) "| ANSWERED"))
+    (is (not (str/includes? (progress/render-topology work) "| CLOSED")))))
+
 (deftest current-work-keeps-resolution-target-for-synthesis-context
   (let [graph (-> (progress/empty-graph)
                   (add :todo :to-do "Run experiment" [] 0)

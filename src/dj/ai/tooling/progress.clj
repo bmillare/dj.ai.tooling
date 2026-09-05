@@ -342,14 +342,19 @@
      :nodes (into []
                   (comp (filter node-ids)
                         (map (fn [node-id]
-                               (let [value (node graph node-id)]
+                               (let [value (node graph node-id)
+                                     resolvers (resolved-by graph node-id)]
                                  (assoc value
                                         :spawn-children
                                         (into [] (comp (map :id) (filter node-ids))
                                               (children graph node-id))
                                         :resolved-by
                                         (into [] (comp (map :id) (filter node-ids))
-                                              (resolved-by graph node-id)))))))
+                                              resolvers)
+                                        ;; edges stay non-dangling within the
+                                        ;; projection; this preserves whether a
+                                        ;; resolver exists outside it
+                                        :resolved? (boolean (seq resolvers)))))))
                   (:order graph))
      :frontier projected-frontier}))
 
@@ -500,7 +505,7 @@
                      " | actions: " (or (not-empty (alias-list aliases (frontier-ids :to-dos))) "none")
                      " | synthesis: " (or (not-empty (alias-list aliases (frontier-ids :unsynthesized-dones))) "none"))
         render-node
-        (fn [{:keys [id kind body status spawned-by resolves resolved-by pinned-under artifacts gutter author]}]
+        (fn [{:keys [id kind body status spawned-by resolves resolved? pinned-under artifacts gutter author]}]
           (let [[_ label] (render-kind kind)
                 prefix (gutter-prefix gutter)
                 continuation (gutter-prefix (map gutter-continuation gutter))
@@ -511,7 +516,7 @@
                              (str " | resolves " (alias-list aliases resolves)))
                 state (when (and (agenda? {:kind kind}) (not= :open status))
                         (str " | "
-                             (if (and (= :closed status) (seq resolved-by))
+                             (if (and (= :closed status) resolved?)
                                (case kind :to-know "ANSWERED" :to-do "COMPLETED")
                                (str/upper-case (name status)))))
                 pin (when pinned-under (str " | pinned under " (aliases pinned-under)))
