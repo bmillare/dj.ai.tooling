@@ -135,42 +135,43 @@
        [:div.pin-line "standing under " (short-body graph pinned-under)])
      (when (progress/synthesis-pending? graph node-id)
        [:div.synthesis-badge "Awaiting synthesis"])
-     [:details.inspector
-      [:summary "Inspect"]
-      [:code.id node-id]
-      (edge-list "resolved by" (map :id (progress/resolved-by graph node-id)))]
-     [:div.local-editor
-      [:textarea {:data-bind draft :rows "2" :placeholder "Spawn a thought from here…"}]
-      [:div.kind-actions
-       (for [kind [:done :know :to-know :to-do]]
-         [:button {:type "button" :data-kind (name kind)
-                   :data-on:click (str "@post('/spawn?parent=" node-id
-                                       "&kind=" (name kind) "'); $" draft " = ''")}
-          (get kind-labels kind)])]
-      (when (seq nodes)
-        [:details.join
-         [:summary "More links…"]
-         (select-field "Also from" also-from nodes {:allow-empty? true})
-         (select-field "Resolves" resolves nodes {:allow-empty? true})
-         [:label.field [:span "Artifact reference"]
-          [:input {:data-bind artifact :placeholder "file, URL, commit, or run"}]]
-         [:label.check-field
-          [:input {:type "checkbox" :data-bind standing}]
-          [:span "Standing Know under this node"]]])]
-     (when (and (= :to-do (:kind node)) (#{:open :blocked} (:status node)))
-       [:div.complete-editor
-        [:input {:data-bind done-note :placeholder "Optional completion note"}]
-        [:button.primary {:type "button"
-                          :data-on:click (str "@post('/complete?node=" node-id "')")}
-         "Record done"]])
-     (when (progress/agenda? node)
-       [:div.status-actions
-        (for [status [:open :blocked :closed :cancelled]
-              :when (progress/status-transition? node status)]
-          [:button {:type "button"
-                    :data-on:click (str "@post('/set-status?node=" node-id
-                                        "&status=" (name status) "')")}
-           (get status-labels status)])])]))
+     [:div.node-controls {:data-show "!$readMode"}
+      [:details.inspector
+       [:summary "Inspect"]
+       [:code.id node-id]
+       (edge-list "resolved by" (map :id (progress/resolved-by graph node-id)))]
+      [:div.local-editor
+       [:textarea {:data-bind draft :rows "2" :placeholder "Spawn a thought from here…"}]
+       [:div.kind-actions
+        (for [kind [:done :know :to-know :to-do]]
+          [:button {:type "button" :data-kind (name kind)
+                    :data-on:click (str "@post('/spawn?parent=" node-id
+                                        "&kind=" (name kind) "'); $" draft " = ''")}
+           (get kind-labels kind)])]
+       (when (seq nodes)
+         [:details.join
+          [:summary "More links…"]
+          (select-field "Also from" also-from nodes {:allow-empty? true})
+          (select-field "Resolves" resolves nodes {:allow-empty? true})
+          [:label.field [:span "Artifact reference"]
+           [:input {:data-bind artifact :placeholder "file, URL, commit, or run"}]]
+          [:label.check-field
+           [:input {:type "checkbox" :data-bind standing}]
+           [:span "Standing Know under this node"]]])]
+      (when (and (= :to-do (:kind node)) (#{:open :blocked} (:status node)))
+        [:div.complete-editor
+         [:input {:data-bind done-note :placeholder "Optional completion note"}]
+         [:button.primary {:type "button"
+                           :data-on:click (str "@post('/complete?node=" node-id "')")}
+          "Record done"]])
+      (when (progress/agenda? node)
+        [:div.status-actions
+         (for [status [:open :blocked :closed :cancelled]
+               :when (progress/status-transition? node status)]
+           [:button {:type "button"
+                     :data-on:click (str "@post('/set-status?node=" node-id
+                                         "&status=" (name status) "')")}
+            (get status-labels status)])])]]))
 
 (defn- node-depths [graph]
   (reduce (fn [depths node-id]
@@ -204,7 +205,8 @@
   (let [{:keys [graph notice]} @state
         nodes (ordered-nodes graph)
         depths (node-depths graph)]
-    [:main#app
+    [:main#app {:data-signals__ifmissing "{readMode: true}"
+                :data-class:read-mode "$readMode"}
      [:section.hero
       [:p.eyebrow "dj.ai.tooling / dev"]
       [:h1 "Progress graph builder"]
@@ -212,12 +214,19 @@
      (when notice
        [:aside.notice {:data-level (name (:level notice))} (:message notice)])
      (frontier-summary graph)
-     (root-form graph)
-     (synthesis-inbox graph)
+     [:div {:data-show "!$readMode"} (root-form graph)]
+     [:div {:data-show "!$readMode"} (synthesis-inbox graph)]
      [:section.graph
       [:div.section-heading
        [:h2 "Topology"]
-       [:span (str (count nodes) (if (= 1 (count nodes)) " node" " nodes"))]]
+       [:div.heading-actions
+        [:span (str (count nodes) (if (= 1 (count nodes)) " node" " nodes"))]
+        [:button.mode-switch {:type "button" :data-show "$readMode"
+                              :data-on:click "$readMode = false"}
+         "Edit"]
+        [:button.mode-switch {:type "button" :data-show "!$readMode"
+                              :data-on:click "$readMode = true"}
+         "Read"]]]
       (if (seq nodes)
         [:div.node-list (map #(node-card graph % (depths (:id %))) nodes)]
         [:div.empty-state "The graph is empty. Add a root to begin."])]]))
@@ -249,6 +258,7 @@
   .hint { font-size: .8rem; margin: 1rem 0 0; }
   .kind-actions { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .8rem; } .kind-actions button[data-kind=know] { border-color: #5a9c70; } .kind-actions button[data-kind=done] { border-color: #5287aa; }
   .graph, .inbox { margin-top: 2.5rem; } .section-heading { margin-bottom: 1rem; color: #a8b4aa; } .section-heading h2 { color: #e9eee9; }
+  .heading-actions { display: flex; align-items: center; gap: .7rem; } .mode-switch { min-width: 4rem; }
   .node-list { display: grid; gap: 1rem; align-items: start; padding: .5rem; } .node-card { position: relative; width: min(48rem, calc(100% - var(--depth) * 2rem)); margin-left: calc(var(--depth) * 2rem); background: #171c18; border: 1px solid #2c352e; border-left: .3rem solid #778079; border-radius: .75rem; padding: 1rem; }
   .node-card[style*=\"--depth:0\"] { width: min(48rem, 100%); }
   .node-card:not([style*=\"--depth:0\"]):before { content: ''; position: absolute; left: -2.3rem; top: -1.05rem; width: 2rem; height: 2rem; border-left: 2px solid #526259; border-bottom: 2px solid #526259; border-radius: 0 0 0 .45rem; }
@@ -262,6 +272,12 @@
   .pin-line, .synthesis-badge { color: #8fdda9; font-size: .72rem; margin: .4rem 0; } .synthesis-badge { color: #dbb167; }
   .inspector { color: #718078; font-size: .72rem; margin: .5rem 0; } .inspector summary, .join summary { cursor: pointer; }
   .local-editor { border-top: 1px solid #2c352e; padding-top: .75rem; margin-top: .75rem; } .local-editor textarea { background: #f7faf7; min-height: 6rem; }
+  .read-mode { padding-top: 2rem; } .read-mode .hero { margin-bottom: 1rem; } .read-mode .hero h1 { font-size: clamp(2rem, 5vw, 3.4rem); }
+  .read-mode .graph { margin-top: 1.25rem; } .read-mode .node-list { gap: .4rem; padding-top: 0; }
+  .read-mode .node-card { padding: .55rem .75rem; border-radius: .45rem; width: min(60rem, calc(100% - var(--depth) * 1.35rem)); margin-left: calc(var(--depth) * 1.35rem); }
+  .read-mode .node-card[style*=\"--depth:0\"] { width: min(60rem, 100%); }
+  .read-mode .node-card:not([style*=\"--depth:0\"]):before { left: -1.65rem; top: -.45rem; width: 1.35rem; height: 1.1rem; }
+  .read-mode .body { font-size: .95rem; margin: .35rem 0 .2rem; } .read-mode .lineage { margin: .2rem 0; }
   .join { margin-top: .65rem; color: #a8b4aa; font-size: .75rem; } .join .field { margin-top: .5rem; }
   .complete-editor { display: grid; grid-template-columns: 1fr auto; gap: .45rem; margin-top: .7rem; } .complete-editor input { min-width: 0; }
   .inbox-item { display: flex; justify-content: space-between; gap: 1rem; align-items: center; padding: .8rem; border: 1px solid #4b4029; background: #211d15; border-radius: .65rem; margin-bottom: .5rem; }

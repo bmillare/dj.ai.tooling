@@ -46,6 +46,15 @@
     (is (str/includes? body "data-bind=\"rootBody\""))
     (is (str/includes? body "@post(&apos;/add-root?kind=know&apos;)"))))
 
+(deftest topology-defaults-to-condensed-read-mode
+  (add-root "know" "Content remains prominent")
+  (let [body (:body (builder/app {:request-method :get :uri "/"}))]
+    (is (str/includes? body "data-signals__ifmissing=\"{readMode: true}\""))
+    (is (str/includes? body "data-class:read-mode=\"$readMode\""))
+    (is (str/includes? body "data-show=\"!$readMode\""))
+    (is (str/includes? body "data-on:click=\"$readMode = false\""))
+    (is (str/includes? body "Content remains prominent"))))
+
 (deftest node-local-capture-supports-joins-and-topology
   (is (= 204 (:status (add-root "to-know" "What matters?"))))
   (is (= 204 (:status (add-root "know" "Standing context"))))

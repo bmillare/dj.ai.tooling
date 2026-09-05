@@ -290,6 +290,10 @@ The pure `progress/topology` query projects capture-ordered nodes with direct
 `:spawn-children` and `:resolved-by` edges, plus roots and the derived frontier.
 Restarting the process clears the graph.
 
+The topology opens in a condensed Read mode that retains node content and
+relationships while hiding capture and workflow controls. Use the Read/Edit
+switch beside the node count to expose the full authoring surface.
+
 The builder also starts an nREPL server bound to localhost on an ephemeral
 port and writes that port to `.nrepl-port`. This is the preferred live agent
 seam: call `dj.ai.tooling.progress-builder/topology` to read the semantic graph
@@ -301,5 +305,5 @@ so reloading the builder namespace preserves the live graph. For example, with `
 ```bash
 clj-nrepl-eval --discover-ports
 clj-nrepl-eval -p "$(<.nrepl-port)" \
-  '(dj.ai.tooling.progress/topology (:graph @dj.ai.tooling.progress-builder/state))'
+  '(dj.ai.tooling.progress-builder/topology)'
 ```
