@@ -65,9 +65,10 @@
   "Scans text for watson-entry blocks. Returns {:entries [...] :errors [...]}.
   Each entry: {:id string :line n :nodes-text string :bodies {tempid-name text}
   :errors [...]} — entry-local problems (duplicate body tags, missing nodes
-  block) land on the entry, structural problems that orphan text (unclosed
-  tags, stray closers) land in top-level :errors. Text outside entries is
-  ignored, so a whole log or transcript can be scanned as-is."
+  block, a watson tag at line start inside a block) land on the entry and
+  reject only it; structural problems that orphan text (unclosed tags, stray
+  closers outside any entry) land in top-level :errors. Text outside entries
+  is ignored, so a whole log or transcript can be scanned as-is."
   [text]
   (let [lines (str/split-lines text)]
     (loop [[line & remaining] lines
@@ -151,12 +152,13 @@
                   (recur remaining next-line-number :entry entry nil entries errors))
 
                 (re-find any-tag-re line)
-                (recur remaining next-line-number :nodes entry
+                (recur remaining next-line-number :nodes
+                       (update entry :errors conj
+                               (parse-error line-number
+                                            (str "watson tag inside <watson-nodes>: "
+                                                 (str/trim line))))
                        (update block :lines conj line)
-                       entries
-                       (conj errors (parse-error line-number
-                                                 (str "watson tag inside <watson-nodes>: "
-                                                      (str/trim line)))))
+                       entries errors)
 
                 :else
                 (recur remaining next-line-number :nodes entry
@@ -177,10 +179,12 @@
                   (recur remaining next-line-number :entry entry nil entries errors))
 
                 (re-find any-tag-re line)
-                (recur remaining next-line-number :body entry block entries
-                       (conj errors (parse-error line-number
-                                                 (str "watson tag inside <watson-body>: "
-                                                      (str/trim line)))))
+                (recur remaining next-line-number :body
+                       (update entry :errors conj
+                               (parse-error line-number
+                                            (str "watson tag inside <watson-body>: "
+                                                 (str/trim line))))
+                       block entries errors)
 
                 :else
                 (recur remaining next-line-number :body entry

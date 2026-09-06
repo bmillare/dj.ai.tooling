@@ -60,9 +60,11 @@ prose after is ignored too")
   (let [analyze-errors #(-> % analyzed first :errors)]
     (is (seq (:errors (imp/parse "<watson-entry>\n<watson-nodes>\n{}\n"))))
     (is (seq (:errors (imp/parse "<watson-body for=\"x\">\nstray\n</watson-body>"))))
-    ;; a watson tag mid-body is an error, never silently swallowed
-    (is (seq (:errors (imp/parse (str/replace entry-text "raw lines"
-                                              "raw\n<watson-nodes>")))))
+    ;; a watson tag at line start mid-body rejects that entry, not the file
+    (let [{:keys [entries errors]}
+          (imp/parse (str/replace entry-text "raw lines" "raw\n<watson-nodes>"))]
+      (is (empty? errors))
+      (is (seq (:errors (first entries)))))
     ;; duplicate body tag
     (is (seq (analyze-errors
               (str/replace entry-text "for=\"k1\"" "for=\"q1\""))))
@@ -124,10 +126,15 @@ prose after is ignored too")
 (deftest builder-import-is-atomic-idempotent-and-loud
   (let [first-run (builder/import-text! entry-text)
         second-run (builder/import-text! entry-text)
+        ;; a later edit that mangles an already-imported entry's block must
+        ;; still skip — an imported id is settled
+        mangled-run (builder/import-text!
+                     (str/replace entry-text "raw lines" "raw\n<watson-nodes>"))
         rejected (builder/import-text! atomic-entry)
         graph (:graph @builder/state)]
     (is (= [:imported] (map :status (:results first-run))))
     (is (= [:skipped] (map :status (:results second-run))))
+    (is (= [:skipped] (map :status (:results mangled-run))))
     (is (= [:rejected] (map :status (:results rejected))))
     ;; atomic: neither node of the rejected entry landed
     (is (= 2 (count (:order graph))))

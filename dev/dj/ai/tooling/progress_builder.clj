@@ -306,6 +306,20 @@
     (subscribed/mark-dirty! subscriptions)
     (some #(when (= node-id (:id %)) %) (:nodes (topology)))))
 
+(defn edit-body!
+  "Rewrites an existing node's body text in place — the REPL twin of the UI's
+  Edit text gesture, e.g. after correcting an imported entry's prose so the
+  log and the graph say the same thing. Requires `identify!` first."
+  [node-id body]
+  (let [graph (:graph @state)
+        node-id (progress/resolve-id graph node-id)
+        author (repl-author!)]
+    (transact! #(-> %
+                    (update :graph progress/edit-body node-id body)
+                    (author-event author :edit-body {:node-ids [node-id]})))
+    (subscribed/mark-dirty! subscriptions)
+    (some #(when (= node-id (:id %)) %) (:nodes (topology)))))
+
 (defn- import-one!
   "Transacts one analyzed watson entry all-or-nothing. The dry run IS the
   transaction: entry-tx folds inside the recorder's single-writer tx fn, so a
@@ -313,8 +327,16 @@
   checked in the same place against :imported-entries."
   [entry author]
   (let [result (volatile! nil)]
-    (if (seq (:errors entry))
+    (cond
+      ;; an already-imported id is settled — a later edit that mangles its
+      ;; block must not turn every future scan of the file into a failure
+      (contains? (:imported-entries @state) (:id entry))
+      (vreset! result {:status :skipped})
+
+      (seq (:errors entry))
       (vreset! result {:status :rejected :errors (:errors entry)})
+
+      :else
       (try
         (transact!
          (fn [current]
@@ -1240,7 +1262,7 @@
     (commit! #(progress/spawn % #{node-id} (node-value :know body))
              "Synthesis recorded.")))
 
-(defn- edit-body! [request]
+(defn- edit-body-request! [request]
   (let [node-id (get-in request [:query-params "node"])
         body (get (fused/signals request)
                   (keyword (signal-name "bodyDraft" node-id)))]
@@ -1272,7 +1294,7 @@
     [:post "/spawn"] (spawn-node! request)
     [:post "/complete"] (complete! request)
     [:post "/synthesize"] (synthesize! request)
-    [:post "/edit-body"] (edit-body! request)
+    [:post "/edit-body"] (edit-body-request! request)
     [:post "/resolve-existing"] (resolve-existing! request)
     [:post "/set-status"] (set-status! request)
     response/not-found))
