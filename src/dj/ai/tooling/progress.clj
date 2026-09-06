@@ -360,8 +360,36 @@
   ([graph {:keys [scope]}]
    (unsynthesized-dones-in graph (scope-node-ids graph scope))))
 
+(defn- untriaged-knows-in [graph scope-ids]
+  (let [synthesizes-done? (fn [value]
+                            (some #(let [parent (node graph %)]
+                                     (and (= :done (:kind parent))
+                                          (not= :cancelled (:status parent))))
+                                  (:spawned-by value)))]
+    (into []
+          (comp (map #(node graph %))
+                (filter #(and (= :know (:kind %))
+                              (not= :cancelled (:status %))
+                              (empty? (:resolves %))
+                              (empty? (get-in graph [:spawn-children (:id %)]))
+                              (not (:pinned-under %))
+                              (not (synthesizes-done? %))
+                              (in-scope? scope-ids (:id %)))))
+          (:order graph))))
+
+(defn untriaged-knows
+  "Returns non-cancelled capture Knows pending triage: childless, resolving
+  nothing, neither pinned as standing context nor synthesizing a Done. Triage
+  is extending the graph — spawning a question, action, or grouping Know from
+  the capture (or resolving/pinning it after the fact) removes it from the
+  inbox. There is no read mark to shelve a capture without processing it."
+  ([graph] (untriaged-knows graph {}))
+  ([graph {:keys [scope]}]
+   (untriaged-knows-in graph (scope-node-ids graph scope))))
+
 (defn frontier
-  "Returns the understanding agenda, activity agenda, and synthesis inbox."
+  "Returns the understanding agenda, activity agenda, synthesis inbox, and
+  capture-triage inbox."
   ([graph] (frontier graph {}))
   ([graph {:keys [scope]}]
    (let [scope-ids (scope-node-ids graph scope)
@@ -374,7 +402,8 @@
                          (:order graph)))]
      {:to-knows (visible :to-know)
       :to-dos (visible :to-do)
-      :unsynthesized-dones (unsynthesized-dones-in graph scope-ids)})))
+      :unsynthesized-dones (unsynthesized-dones-in graph scope-ids)
+      :untriaged-knows (untriaged-knows-in graph scope-ids)})))
 
 (defn standing-context [graph {:keys [focus]}]
   (require-node graph focus :focus)
@@ -693,7 +722,8 @@
         summary (str "FRONTIER"
                      " | questions: " (or (not-empty (alias-list aliases (frontier-ids :to-knows))) "none")
                      " | actions: " (or (not-empty (alias-list aliases (frontier-ids :to-dos))) "none")
-                     " | synthesis: " (or (not-empty (alias-list aliases (frontier-ids :unsynthesized-dones))) "none"))
+                     " | synthesis: " (or (not-empty (alias-list aliases (frontier-ids :unsynthesized-dones))) "none")
+                     " | triage: " (or (not-empty (alias-list aliases (frontier-ids :untriaged-knows))) "none"))
         render-node
         (fn [{:keys [id kind body status spawned-by resolves resolved? pinned-under artifacts gutter author]}]
           (let [[_ label] (render-kind kind)

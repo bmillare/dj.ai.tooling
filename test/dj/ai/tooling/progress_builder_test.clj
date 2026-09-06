@@ -206,9 +206,9 @@
     (let [body (:body (builder/app {:request-method :get :uri "/"}))]
       (is (str/includes? body "Current work"))
       (is (str/includes? body "$graphFilter = &apos;current-work&apos;"))
-      ;; two card visibility clauses (frontier item + ancestry) plus one chip;
-      ;; closed history matches nothing
-      (is (= 3 (count (re-seq #"includes\(&apos; current-work &apos;\)" body)))))))
+      ;; three card visibility clauses (frontier item + ancestry + the
+      ;; untriaged capture, which the triage inbox keeps live) plus one chip
+      (is (= 4 (count (re-seq #"includes\(&apos; current-work &apos;\)" body)))))))
 
 (deftest lineage-lines-expand-the-visible-context
   (let [root (builder/record! {:kind :know :body "Shared parent"})

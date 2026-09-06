@@ -354,6 +354,40 @@
                   (progress/set-status :know :cancelled))]
     (is (= [:done] (mapv :id (progress/unsynthesized-dones graph))))))
 
+(deftest untriaged-knows-is-the-capture-inbox
+  (let [graph (-> (progress/empty-graph)
+                  (add :capture :know "Raw thought" [] 0)
+                  (add :q :to-know "Question?" [] 1)
+                  (add :answer :know "Answer" [:q] 2)
+                  (progress/resolve :answer [:q])
+                  (add :done :done "Result" [] 4)
+                  (add :synthesis :know "Reviewed result" [:done] 5)
+                  (progress/add-node {:id :pinned :kind :know :body "Standing"
+                                      :pinned-under :q
+                                      :created-at #inst "2026-09-04T00:06:00Z"})
+                  (add :retracted :know "Oops" [] 7)
+                  (progress/set-status :retracted :cancelled))]
+    ;; only genuine captures: :answer resolves, :synthesis closes a Done,
+    ;; :pinned is standing context, :retracted is cancelled, the rest have
+    ;; children or the wrong kind
+    (is (= [:capture] (mapv :id (progress/untriaged-knows graph))))
+    (is (= [:capture]
+           (mapv :id (:untriaged-knows (progress/frontier graph)))))
+    ;; extending the graph from the capture is what triages it: the member
+    ;; leaves the inbox and the new grouping Know takes its place
+    (is (= [:theme]
+           (mapv :id (progress/untriaged-knows
+                      (add graph :theme :know "Theme" [:capture] 9)))))))
+
+(deftest untriaged-knows-respects-scope
+  (let [graph (-> (progress/empty-graph)
+                  (add :root-a :know "Root A" [] 0)
+                  (add :root-b :know "Root B" [] 1)
+                  (add :inside :know "Capture inside" [:root-a] 2)
+                  (add :outside :know "Capture outside" [:root-b] 3))]
+    (is (= [:inside]
+           (mapv :id (progress/untriaged-knows graph {:scope :root-a}))))))
+
 (deftest focus-and-session-return-structured-data
   (let [graph (example-graph)
         context (progress/focus-context graph :done-a)
@@ -399,8 +433,12 @@
                                       :created-at #inst "2026-09-04T00:04:00Z"}))
         all-work (progress/current-work graph)
         agent-work (progress/current-work graph {:author {:actor :agent}})]
-    (is (= [:root :closed-q :agent-q :brent-action]
+    ;; :dead-root is an unpromoted capture Know, so it now surfaces via the
+    ;; triage inbox instead of silently dropping out of current work
+    (is (= [:root :closed-q :agent-q :dead-root :brent-action]
            (mapv :id (:nodes all-work))))
+    (is (= [:dead-root]
+           (mapv :id (get-in all-work [:frontier :untriaged-knows]))))
     (is (= [:root :closed-q :agent-q]
            (mapv :id (:nodes agent-work))))
     (is (= [:agent-q]
@@ -434,8 +472,9 @@
     (is (= {:old "K1" :root "K2" :question "Q1"}
            (get (progress/aliases graph) :id->alias)))
     (is (= :root (progress/resolve-id graph "K2")))
-    (is (= [:root :question] (mapv :id (:nodes work))))
-    (is (= ["K2" "Q1"] (mapv :alias (:nodes work))))
+    ;; :old is a childless capture Know: pending triage, so it stays visible
+    (is (= [:old :root :question] (mapv :id (:nodes work))))
+    (is (= ["K1" "K2" "Q1"] (mapv :alias (:nodes work))))
     (is (str/includes? (progress/render-topology work) "[K2] KNOW"))
     (is (= "K2" (:alias (second (:nodes full)))))))
 
@@ -456,7 +495,7 @@
                   (add :d :done "The check passed" [:a] 2)
                   (progress/resolve :d [:a]))
         rendered (progress/render-topology (progress/topology graph))]
-    (is (= (str "FRONTIER | questions: Q1 | actions: none | synthesis: D1\n\n"
+    (is (= (str "FRONTIER | questions: Q1 | actions: none | synthesis: D1 | triage: none\n\n"
                 "[Q1] TO KNOW: What changed?\n"
                 "[A1] TO DO: Run the check | COMPLETED\n"
                 "[D1] DONE: The check passed | resolves A1")

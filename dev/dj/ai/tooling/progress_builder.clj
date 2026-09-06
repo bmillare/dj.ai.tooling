@@ -422,13 +422,14 @@
   (str "$graphFilter = (' '+$graphFilter+' ').replace(' " token " ', ' ').trim()"))
 
 (defn- filter-expression
-  [{:keys [question-ids action-ids synthesis-ids current-work-ids
+  [{:keys [question-ids action-ids synthesis-ids triage-ids current-work-ids
            resolution-targets contexts]} node]
   (let [node-id (:id node)]
     (str "$graphFilter == ''"
          (when (question-ids node-id) (filter-clause "questions"))
          (when (action-ids node-id) (filter-clause "actions"))
          (when (synthesis-ids node-id) (filter-clause "synthesis"))
+         (when (triage-ids node-id) (filter-clause "triage"))
          (when (current-work-ids node-id) (filter-clause "current-work"))
          (when (resolution-targets node-id)
            (filter-clause (str "resolution:" node-id)))
@@ -649,11 +650,12 @@
      [:p.frontier-empty "None"])])
 
 (defn- frontier-summary [alias-of frontier]
-  (let [{:keys [to-knows to-dos unsynthesized-dones]} frontier]
+  (let [{:keys [to-knows to-dos unsynthesized-dones untriaged-knows]} frontier]
     [:section.frontier
      (frontier-group alias-of "questions" "open questions" to-knows)
      (frontier-group alias-of "actions" "open actions" to-dos)
-     (frontier-group alias-of "synthesis" "results to review" unsynthesized-dones)]))
+     (frontier-group alias-of "synthesis" "results to review" unsynthesized-dones)
+     (frontier-group alias-of "triage" "captures to triage" untriaged-knows)]))
 
 (defn- change-row
   "One authored (or legacy-capture) event; visibility is client-side so the
@@ -673,6 +675,7 @@
   [{:token "questions" :label "questions"}
    {:token "actions" :label "actions"}
    {:token "synthesis" :label "synthesis"}
+   {:token "triage" :label "triage"}
    {:token "current-work" :label "current work"}])
 
 (defn- filter-chips
@@ -762,7 +765,7 @@
    [:div.help-columns
     (help-group
      "Focus (replaces the view)"
-     ["Frontier heading (count)" "Show all open questions, open actions, or results to review."]
+     ["Frontier heading (count)" "Show all open questions, open actions, results to review, or captures to triage. A capture leaves the triage inbox when the graph is extended from it (spawn, resolve, pin) — there are no read marks or action buttons."]
      ["Frontier list item" "Focus that item's context: the node, two hops of ancestry, and its direct children. Focus the topmost visible ancestor to climb further."]
      ["Open / Blocked status pill" "Same context focus, from the card itself (questions and actions only)."]
      ["Answered / Completed pill" "Show the item together with the outcome that resolved it."]
@@ -806,6 +809,7 @@
              :question-ids (set (map :id (:to-knows frontier)))
              :action-ids (set (map :id (:to-dos frontier)))
              :synthesis-ids (set (map :id (:unsynthesized-dones frontier)))
+             :triage-ids (set (map :id (:untriaged-knows frontier)))
              :resolution-targets (into #{} (mapcat :resolves) (:nodes topology))
              :current-work-ids
              (set (map :id (:nodes (progress/current-work graph))))}]
@@ -870,7 +874,7 @@
   .eyebrow { color: #8ab4f8; font-size: .72rem; font-weight: 800; letter-spacing: .16em; text-transform: uppercase; margin-bottom: .7rem; }
   .notice { border: 1px solid #464c5c; background: #181b22; border-radius: .75rem; padding: .9rem 1rem; margin-bottom: 1rem; }
   .notice[data-level=error] { border-color: #a75454; background: #291818; color: #ffc1c1; }
-  .frontier { display: grid; grid-template-columns: repeat(3, 1fr); gap: .7rem; margin-bottom: 1rem; }
+  .frontier { display: grid; grid-template-columns: repeat(4, 1fr); gap: .7rem; margin-bottom: 1rem; }
   .frontier-group { min-width: 0; background: #17181c; border: 1px solid #2b2d33; border-radius: .8rem; padding: .65rem; }
   .frontier-heading { width: 100%; border: 0; background: transparent; padding: .35rem; text-align: left; }
   .frontier-heading:hover { background: #212329; }
