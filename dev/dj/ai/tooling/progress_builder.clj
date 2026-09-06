@@ -5,6 +5,7 @@
   http://localhost:9090. A dj.recorder log is the persistence boundary."
   (:require [clojure.string :as str]
             [dj.ai.tooling.progress :as progress]
+            [dj.ai.tooling.progress-import :as imp]
             [dj.recorder :as recorder]
             [dj.recorder.patch :as recorder.patch]
             [dj.web.datastar.assets :as assets]
@@ -20,6 +21,7 @@
   {:graph (progress/empty-graph)
    :events []
    :event-cursor 0
+   :imported-entries #{}
    :notice nil})
 
 (def ^:private state-path
@@ -303,6 +305,86 @@
                     (author-event event-author :attribute)))
     (subscribed/mark-dirty! subscriptions)
     (some #(when (= node-id (:id %)) %) (:nodes (topology)))))
+
+(defn- import-one!
+  "Transacts one analyzed watson entry all-or-nothing. The dry run IS the
+  transaction: entry-tx folds inside the recorder's single-writer tx fn, so a
+  throw persists nothing and there is no validate/commit race. Idempotency is
+  checked in the same place against :imported-entries."
+  [entry author]
+  (let [result (volatile! nil)]
+    (if (seq (:errors entry))
+      (vreset! result {:status :rejected :errors (:errors entry)})
+      (try
+        (transact!
+         (fn [current]
+           (if (contains? (:imported-entries current) (:id entry))
+             (do (vreset! result {:status :skipped}) current)
+             (let [{:keys [graph node-ids resolved]}
+                   (imp/entry-tx (:graph current) entry {:author author})]
+               (vreset! result {:status :imported :node-ids node-ids
+                                :resolved resolved})
+               (-> current
+                   (assoc :graph graph)
+                   (update :imported-entries (fnil conj #{}) (:id entry))
+                   (author-event author :import {:node-ids node-ids
+                                                 :entry-id (:id entry)}))))))
+        (catch Exception e
+          (vreset! result {:status :rejected
+                           :errors [(merge {:error (.getMessage e)}
+                                           (some->> (ex-data e)
+                                                    (hash-map :data)))]}))))
+    (assoc @result :entry-id (:id entry))))
+
+(defn import-text!
+  "Scans text for watson entries (see dj.ai.tooling.progress-import) and
+  imports each atomically: already-imported entry ids skip, invalid entries
+  reject with nothing transacted, valid ones land whole. Requires `identify!`
+  first; an entry's top-level :author overrides it. Returns
+  {:results [...] :errors [...]} — render with import-report-view."
+  [text]
+  (let [author (repl-author!)
+        {:keys [entries errors]} (imp/parse text)
+        results (mapv #(import-one! (imp/analyze %) author) entries)]
+    (when (some #(= :imported (:status %)) results)
+      (subscribed/mark-dirty! subscriptions))
+    {:results results :errors errors}))
+
+(defn import-report-view
+  "Model-facing rendering of an import-text! report: per entry its outcome,
+  new aliases, and the external-reference receipt (what each alias resolved
+  to at import time, with a body preview so mis-resolution is visible)."
+  [{:keys [results errors]}]
+  (let [graph (:graph @state)
+        alias-of (:id->alias (progress/aliases graph))
+        preview (fn [id] (let [body (:body (progress/node graph id))]
+                           (subs body 0 (min 72 (count body)))))
+        outcome (frequencies (map :status results))]
+    (str "IMPORT | imported " (:imported outcome 0)
+         " | skipped " (:skipped outcome 0)
+         " | rejected " (+ (:rejected outcome 0) (count errors))
+         (apply str
+                (for [{:keys [entry-id status node-ids resolved errors]} results]
+                  (str "\n\n[" entry-id "] " (name status)
+                       (when (seq node-ids)
+                         (str "\n  new: " (str/join ", " (map alias-of node-ids))))
+                       (when (seq resolved)
+                         (apply str
+                                (for [[ref id] resolved]
+                                  (str "\n  ref " ref " -> " (alias-of id)
+                                       " · " (preview id)))))
+                       (apply str
+                              (for [problem errors]
+                                (str "\n  REJECTED: " (pr-str problem)))))))
+         (apply str
+                (for [problem errors]
+                  (str "\n\nPARSE ERROR: " (pr-str problem)))))))
+
+(defn import-file!
+  "Slurps a file (e.g. the watson log) and imports every unimported watson
+  entry in it. Returns the rendered report."
+  [path]
+  (import-report-view (import-text! (slurp path))))
 
 (def ^:private kind-labels
   {:done "Done" :know "Know" :to-know "To know" :to-do "To do"})
