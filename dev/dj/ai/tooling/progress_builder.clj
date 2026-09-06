@@ -678,30 +678,6 @@
    {:token "triage" :label "triage"}
    {:token "current-work" :label "current work"}])
 
-(defn- filter-chips
-  "One chip per active lens token, each individually removable, so the view
-  can be grown and shrunk incrementally instead of only reset. Every possible
-  chip is server-rendered and its token merely toggles visibility, keeping the
-  client dumb per dj.web guidance."
-  [{:keys [graph alias-of resolution-targets]}]
-  (let [chips (concat base-filter-chips
-                      (for [target-id resolution-targets]
-                        {:token (str "resolution:" target-id)
-                         :label (str "resolved: " (alias-of target-id))})
-                      (for [node-id (:order graph)]
-                        {:token (str "context:" node-id)
-                         :label (str "context: " (alias-of node-id))}))]
-    [:div.filter-bar {:data-show "$graphFilter != ''"}
-     [:div.filter-chips
-      [:span.filter-chips-label "Showing"]
-      (for [{:keys [token label]} chips]
-        [:button.chip {:type "button"
-                       :title "Remove this lens from the view"
-                       :data-show (token-test token)
-                       :data-on:click (remove-filter-action token)}
-         label [:span.chip-x "×"]])]
-     [:button {:type "button" :data-on:click "$graphFilter = ''"} "Show all"]]))
-
 (defn- focus-entry
   "Free-typed alias → context lens, so a focus chip can be added without
   hunting for the node in a list. The alias→token map is server-rendered into
@@ -731,6 +707,36 @@
       (for [node-id (:order graph)]
         [:option {:value (alias-of node-id)}
          (short-body graph node-id)])]]))
+
+(defn- filter-chips
+  "One chip per active lens token, each individually removable, so the view
+  can be grown and shrunk incrementally instead of only reset. Every possible
+  chip is server-rendered and its token merely toggles visibility, keeping the
+  client dumb per dj.web guidance. The focus alias box lives here too, so the
+  lens controls (add a lens, see active lenses, drop them) sit together right
+  above the graph."
+  [{:keys [graph alias-of resolution-targets] :as env}]
+  (let [chips (concat base-filter-chips
+                      (for [target-id resolution-targets]
+                        {:token (str "resolution:" target-id)
+                         :label (str "resolved: " (alias-of target-id))})
+                      (for [node-id (:order graph)]
+                        {:token (str "context:" node-id)
+                         :label (str "context: " (alias-of node-id))}))]
+    [:div.filter-bar
+     (focus-entry env)
+     [:div.filter-chips {:data-show "$graphFilter != ''"}
+      [:span.filter-chips-label "Showing"]
+      (for [{:keys [token label]} chips]
+        [:button.chip {:type "button"
+                       :title "Remove this lens from the view"
+                       :data-show (token-test token)
+                       :data-on:click (remove-filter-action token)}
+         label [:span.chip-x "×"]])]
+     [:button.show-all {:type "button"
+                        :data-show "$graphFilter != ''"
+                        :data-on:click "$graphFilter = ''"}
+      "Show all"]]))
 
 (defn- changes-panel
   "Browser lens over changes-since. The bookmark cursor is what a reconnecting
@@ -777,7 +783,7 @@
      ["\"resolves …\" line" "Add the resolved question's or action's context."]
      ["\"answered by / completed by …\" line" "Add the resolver's context."]
      ["\"standing under …\" line" "Add the standing Know's anchor context."]
-     ["Focus alias box (Topology header)" "Type any alias (K7, Q3, …) and press Enter — or pick from the suggestions — to add that node's context without hunting for it."]
+     ["Focus alias box (above the graph)" "Type any alias (K7, Q3, …) and press Enter — or pick from the suggestions — to add that node's context without hunting for it."]
      ["Lens chips (Showing …)" "Each active lens is a chip; × drops just that lens, Show all resets."])
     (help-group
      "Author"
@@ -827,17 +833,16 @@
        [:h2 "Topology"]
        [:div.heading-actions
         [:span (str (count nodes) (if (= 1 (count nodes)) " node" " nodes"))]
-        (focus-entry env)
         [:button.mode-switch {:type "button"
                               :title "Show only the live frontier and its explanatory ancestry"
                               :data-on:click (set-filter-action "current-work")}
          "Current work"]
         [:button.mode-switch {:type "button"
-                              :data-on:click "$showingChanges = !$showingChanges"}
-         "Changes"]
-        [:button.mode-switch {:type "button"
                               :data-on:click "$showingModelView = !$showingModelView"}
          "LLM view"]
+        [:button.mode-switch {:type "button"
+                              :data-on:click "$showingChanges = !$showingChanges"}
+         "Changes"]
         [:button.mode-switch {:type "button"
                               :data-on:click "$creatingRoot = true"}
          "New node"]
@@ -895,7 +900,8 @@
   .hint { font-size: .8rem; margin: 1rem 0 0; }
   .kind-actions { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .8rem; } .kind-actions button[data-kind=know] { border-color: #5a9c70; } .kind-actions button[data-kind=done] { border-color: #5287aa; }
   .graph { margin-top: 2.5rem; } .section-heading { margin-bottom: 1rem; color: #a6a8ae; } .section-heading h2 { color: #e8e9eb; }
-  .heading-actions { display: flex; align-items: center; gap: .7rem; } .mode-switch { min-width: 4rem; }
+  .section-heading { flex-wrap: wrap; row-gap: .5rem; }
+  .heading-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: .4rem .5rem; } .mode-switch { min-width: 4rem; }
   .focus-entry input { width: 8rem; background: #17181c; color: #e8e9eb; border-color: #464c5c; padding: .35rem .5rem; font-size: .76rem; }
   .node-list { --row-gap: 1rem; display: grid; gap: var(--row-gap); align-items: start; padding: .5rem; } .node-card { position: relative; flex: 1 1 auto; min-width: 0; max-width: 48rem; background: #17181c; border: 1px solid #2b2d33; border-left: .3rem solid #778079; border-radius: .75rem; padding: 1rem; }
   .node-row { display: flex; align-items: stretch; } .node-row[data-section-start=true] { margin-top: 1.65rem; } .node-row:first-child { margin-top: 0; }
@@ -955,7 +961,9 @@
   .change-row:hover { background: #17181c; }
   .change-cursor { color: #8ab4f8; } .change-op { color: #dbb167; text-transform: uppercase; font-size: .68rem; letter-spacing: .06em; }
   .change-refs { overflow-wrap: anywhere; }
-  .filter-bar { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: .65rem; padding: .55rem .7rem; border: 1px solid #464c5c; border-radius: .55rem; background: #181b22; color: #b6b9bf; font-size: .76rem; }
+  .filter-bar { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem .8rem; margin-bottom: .65rem; padding: .55rem .7rem; border: 1px solid #464c5c; border-radius: .55rem; background: #181b22; color: #b6b9bf; font-size: .76rem; }
+  .filter-bar .show-all { margin-left: auto; font-size: .72rem; padding: .3rem .55rem; }
+  .filter-bar .focus-entry { flex: none; }
   .filter-chips { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem; min-width: 0; }
   .filter-chips-label { color: #75787f; margin-right: .2rem; }
   .chip { display: inline-flex; align-items: center; gap: .35rem; border: 1px solid #464c5c; background: #212329; border-radius: 999px; padding: .18rem .6rem; font-size: .72rem; color: #caccd1; }
