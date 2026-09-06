@@ -54,7 +54,7 @@
 (deftest topology-is-dense-with-root-and-node-local-editing
   (add-root "know" "Content remains prominent")
   (let [body (:body (builder/app {:request-method :get :uri "/"}))]
-    (is (str/includes? body "data-signals__ifmissing=\"{creatingRoot: false, showingModelView: false, showingChanges: false, changesCursor: &apos;&apos;, graphFilter: &apos;&apos;}\""))
+    (is (str/includes? body "data-signals__ifmissing=\"{creatingRoot: false, showingModelView: false, showingChanges: false, showingHelp: false, changesCursor: &apos;&apos;, graphFilter: &apos;&apos;}\""))
     (is (str/includes? body "data-show=\"$creatingRoot\""))
     (is (str/includes? body "$editing_"))
     (is (str/includes? body "New node"))
@@ -145,9 +145,9 @@
     (builder/record! {:kind :know :body "Aliased answer"
                       :resolves #{(:id question)}})
     (let [body (:body (builder/app {:request-method :get :uri "/"}))]
-      (is (str/includes? body "class=\"alias\">K1"))
-      (is (str/includes? body "class=\"alias\">Q1"))
-      (is (str/includes? body "class=\"alias\">K2"))
+      (is (str/includes? body "type=\"button\">K1</button>"))
+      (is (str/includes? body "type=\"button\">Q1</button>"))
+      (is (str/includes? body "type=\"button\">K2</button>"))
       ;; selector options and lineage lines lead with the same handle
       (is (str/includes? body "K1 · Know · Aliased root"))
       (is (str/includes? body "answered by</span>K2 · Aliased answer"))
@@ -190,6 +190,31 @@
            body
            (str "(&apos; &apos;+$graphFilter+&apos; &apos;).includes(&apos; context:"
                 (:id root) " &apos;)"))))))
+
+(deftest alias-chip-expands-any-node-s-own-context
+  ;; a Know has no status button, so the alias chip is its only self-expansion
+  (let [know (builder/record! {:kind :know :body "A synthesized fact"})
+        body (:body (builder/app {:request-method :get :uri "/"}))]
+    (is (str/includes? body "<button class=\"alias\""))
+    (is (str/includes? body "Add this node&apos;s context to the view"))
+    ;; the gesture ADDs the token (idempotent append), not a filter reset
+    (is (str/includes?
+         body
+         (str "includes(&apos; context:" (:id know)
+              " &apos;) || ($graphFilter = ($graphFilter ? $graphFilter + &apos; &apos; : &apos;&apos;) + &apos;context:"
+              (:id know))))))
+
+(deftest help-panel-is-a-toggled-gesture-cheat-sheet
+  (let [body (:body (builder/app {:request-method :get :uri "/"}))]
+    (is (str/includes? body "$showingHelp = !$showingHelp"))
+    (is (str/includes? body "showingHelp: false"))
+    (is (str/includes? body "data-show=\"$showingHelp\""))
+    (is (str/includes? body "Cheat sheet"))
+    ;; the quiet affordances are the ones worth conveying
+    (is (str/includes? body "Alias chip (K7, Q3, D5…)"))
+    (is (str/includes? body "Focus (replaces the view)"))
+    (is (str/includes? body "Expand (adds to the view)"))
+    (is (str/includes? body "Record done (on a To Do)"))))
 
 (deftest changes-panel-filters-on-a-client-side-cursor
   (let [first-node (builder/record! {:kind :know :body "First change"})
@@ -254,8 +279,9 @@
     (is (str/includes? body "class=\"status context-filter\""))
     (is (str/includes? body "Show this item in its graph context"))
     (is (str/includes? body "data-chain=\"true\""))
-    ;; three card visibility clauses (focus, ancestor, child) plus one chip
-    (is (= 4 (count (re-seq (re-pattern (java.util.regex.Pattern/quote context-filter))
+    ;; three card visibility clauses (focus, ancestor, child), one chip, and
+    ;; the focus card's own alias-chip expansion guard
+    (is (= 5 (count (re-seq (re-pattern (java.util.regex.Pattern/quote context-filter))
                             body))))
     (is (not (str/includes?
               (first (filter #(str/includes? % (signal-id "bodyDraft" (:id unrelated)))
@@ -296,9 +322,9 @@
     (builder/record! {:kind :know :body "Late child"
                       :spawned-by #{(:id first-root)}})
     (let [body (:body (builder/app {:request-method :get :uri "/"}))]
-      (is (str/includes? body "class=\"alias\">D1"))
-      (is (str/includes? body "class=\"alias\">D2"))
-      (is (str/includes? body "class=\"alias\">K1"))
+      (is (str/includes? body "type=\"button\">D1</button>"))
+      (is (str/includes? body "type=\"button\">D2</button>"))
+      (is (str/includes? body "type=\"button\">K1</button>"))
       (is (str/includes? body "data-section-start=\"true\"")))))
 
 (deftest topology-ui-only-names-a-parent-when-it-is-not-directly-above
@@ -325,12 +351,52 @@
     (is (= "Completed." (get-in graph [:nodes done-id :body])))
     (is (= #{todo-id} (get-in graph [:nodes done-id :resolves])))))
 
-(deftest synthesis-inbox-lists-pending-dones-without-shelving-controls
+(deftest artifact-references-show-on-the-card-face-and-inspector
+  (builder/record! {:kind :done
+                    :body "Wrote the design doc"
+                    :artifacts [{:kind :reference
+                                 :ref "ledger/doc.md @ abc1234"}]})
+  (let [body (:body (builder/app {:request-method :get :uri "/"}))]
+    (is (str/includes? body "class=\"artifact-line\""))
+    (is (str/includes? body "<span>asset</span>ledger/doc.md @ abc1234"))
+    (is (str/includes? body "<span>refs</span>ledger/doc.md @ abc1234"))))
+
+(deftest pending-dones-surface-only-in-the-frontier-summary
   (add-root "done" "A result arrived")
   (let [body (:body (builder/app {:request-method :get :uri "/"}))]
-    (is (str/includes? body "Results to review"))
+    (is (str/includes? body "results to review"))
+    (is (str/includes? body "A result arrived"))
+    (is (not (str/includes? body "class=\"inbox\"")))
     (is (not (str/includes? body "Mark reviewed")))
     (is (not (str/includes? body "Reviewed, no Know yet")))))
+
+(deftest synthesize-shortcut-records-a-prefilled-know-from-a-pending-done
+  (add-root "to-do" "Run the experiment")
+  (let [todo-id (first (get-in @builder/state [:graph :order]))
+        _ (builder/app
+           (post-request "/complete" {"node" todo-id}
+                         (str "{\"" (signal-id "doneNote" todo-id) "\":\"\"}")))
+        done-id (second (get-in @builder/state [:graph :order]))
+        page (:body (builder/app {:request-method :get :uri "/"}))
+        synth-key (signal-id "synth" done-id)]
+    (is (str/includes? page "<button class=\"synthesis-badge\""))
+    (is (str/includes? page "Synthesize this result"))
+    (is (str/includes? page "Reviewed D1 (re A1): as expected; nothing new."))
+    (is (str/includes? page (str "@post(&apos;/synthesize?node=" done-id "&apos;)")))
+    (let [response (builder/app
+                    (post-request "/synthesize" {"node" done-id}
+                                  (str "{\"" synth-key
+                                       "\":\"Reviewed D1 (re A1): confirms K2.\"}")))
+          graph (:graph @builder/state)
+          know-id (last (:order graph))
+          after (:body (builder/app {:request-method :get :uri "/"}))]
+      (is (= 204 (:status response)))
+      (is (= :know (get-in graph [:nodes know-id :kind])))
+      (is (= "Reviewed D1 (re A1): confirms K2."
+             (get-in graph [:nodes know-id :body])))
+      (is (= #{done-id} (get-in graph [:nodes know-id :spawned-by])))
+      (is (not (progress/synthesis-pending? graph done-id)))
+      (is (not (str/includes? after "class=\"synthesis-badge\""))))))
 
 (deftest invalid-command-is-visible-and-does-not-change-graph
   (is (= 204 (:status

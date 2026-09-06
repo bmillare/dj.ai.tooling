@@ -349,6 +349,13 @@
         body-draft (signal-name "bodyDraft" node-id)
         editing (signal-name "editing" node-id)
         resolve-existing (signal-name "resolveExisting" node-id)
+        synth (signal-name "synth" node-id)
+        pending-synthesis? (progress/synthesis-pending? graph node-id)
+        canned-synthesis (str "Reviewed " (:alias node)
+                              (when-let [targets (seq (keep alias-of
+                                                           (:resolves node)))]
+                                (str " (re " (str/join ", " targets) ")"))
+                              ": as expected; nothing new.")
         nodes (remove #(= node-id (:id %)) (ordered-nodes graph))
         resolvable (filterv #(and (compatible-target? (:kind node) %)
                                   (#{:open :blocked} (:status %)))
@@ -369,11 +376,17 @@
                                resolves ": '', " artifact ": '', " standing
                                ": false, " done-note ": '', " body-draft ": "
                                (pr-str (:body node)) ", " editing ": false, "
-                               resolve-existing ": ''}")}
+                               resolve-existing ": ''"
+                               (when pending-synthesis?
+                                 (str ", " synth ": " (pr-str canned-synthesis)))
+                               "}")}
      [:div.node-content
       [:header
        [:div.node-heading
-        [:span.alias (:alias node)]
+        [:button.alias
+         {:type "button" :title "Add this node's context to the view"
+          :data-on:click__stop (add-filter-action (str "context:" node-id))}
+         (:alias node)]
         [:span.kind (get kind-labels (:kind node))]
         (when-let [author (:author node)]
           [:span.byline (str "~" (progress/author-label author))])]
@@ -428,13 +441,22 @@
                                    (str "context:" (:id resolver)))}
             [:span (if (= :to-know (:kind node)) "answered by" "completed by")]
             (aliased-body graph alias-of (:id resolver))])])
+      (when-let [artifacts (seq (:artifacts node))]
+        [:div.artifacts
+         (for [{:keys [ref]} artifacts]
+           [:div.artifact-line
+            {:title "Artifact reference (viewing comes with dj.monitor integration)"}
+            [:span "asset"] ref])])
       (when-let [pinned-under (:pinned-under node)]
         [:button.pin-line
          {:type "button" :title "Add the standing node's context to the view"
           :data-on:click__stop (add-filter-action (str "context:" pinned-under))}
          "standing under " (aliased-body graph alias-of pinned-under)])
-      (when (progress/synthesis-pending? graph node-id)
-        [:div.synthesis-badge "Awaiting synthesis"])]
+      (when pending-synthesis?
+        [:button.synthesis-badge
+         {:type "button" :title "Open the synthesis form for this result"
+          :data-on:click__stop (str "$" editing " = true")}
+         "Awaiting synthesis"])]
      [:div.node-controls {:data-show (str "$" editing)}
       [:div.control-heading [:span "Node actions"]]
       [:form.body-editor
@@ -448,7 +470,16 @@
        [:summary "Inspect"]
        [:code.id (str (:alias node) " · " node-id)]
        (edge-list "resolved by"
-                  (map (comp alias-of :id) (progress/resolved-by graph node-id)))]
+                  (map (comp alias-of :id) (progress/resolved-by graph node-id)))
+       (edge-list "refs" (map :ref (:artifacts node)))]
+      (when pending-synthesis?
+        [:div.synthesize-editor
+         [:div.composer-label "Synthesize this result"]
+         [:textarea {:data-bind synth :rows "2"}]
+         [:button.primary {:type "button"
+                           :data-on:click (str "@post('/synthesize?node="
+                                               node-id "')")}
+          "Record Know"]])
       [:div.local-editor
        [:div.composer-label "Spawn from this node"]
        [:textarea {:data-bind draft :rows "2" :placeholder "Spawn a thought from here…"}]
@@ -499,19 +530,6 @@
                      :data-on:click (str "@post('/set-status?node=" node-id
                                          "&status=" (name status) "')")}
             (get status-labels status)])])]]]))
-
-(defn- synthesis-inbox
-  "Unsynthesized Dones, listed until a Know properly closes them. No read
-  mark and no shelf: a result either gets synthesized or it keeps waiting
-  in plain sight (Q9 resolution, revised — shelving is work with no payoff)."
-  [graph]
-  (let [dones (progress/unsynthesized-dones graph)]
-    (when (seq dones)
-      [:section.inbox
-       [:div.section-heading [:h2 "Results to review"] [:span (count dones)]]
-       (for [done dones]
-         [:div.inbox-item
-          [:span (:body done)]])])))
 
 (defn- frontier-group [alias-of filter-value label nodes]
   [:section.frontier-group
@@ -594,6 +612,52 @@
        [:ol.change-list (map #(change-row graph alias-of %) events)]
        [:p.frontier-empty "No recorded events."])]))
 
+(defn- help-group [title & rows]
+  [:div.help-group
+   [:h3 title]
+   (for [[gesture effect] rows]
+     [:div.help-row [:span.help-gesture gesture] [:span.help-effect effect]])])
+
+(defn- help-panel
+  "Cheat sheet for every gesture the UI offers; the affordances are deliberately
+  quiet (chips, pills, plain text lines), so this is where they are conveyed."
+  []
+  [:section.help-view {:data-show "$showingHelp"}
+   [:div.control-heading
+    [:span "Cheat sheet — every clickable gesture"]
+    [:button {:type "button" :data-on:click "$showingHelp = false"} "Close"]]
+   [:div.help-columns
+    (help-group
+     "Focus (replaces the view)"
+     ["Frontier heading (count)" "Show all open questions, open actions, or results to review."]
+     ["Frontier list item" "Focus that item's context: the node, its ancestry, and its direct children."]
+     ["Open / Blocked status pill" "Same context focus, from the card itself (questions and actions only)."]
+     ["Answered / Completed pill" "Show the item together with the outcome that resolved it."]
+     ["Current work" "The live frontier plus just enough ancestry to explain it."])
+    (help-group
+     "Expand (adds to the view)"
+     ["Alias chip (K7, Q3, D5…)" "Add that node's own context to whatever you are already viewing — works on every card, including Knows and Dones."]
+     ["\"from …\" line" "Add a non-adjacent parent's context."]
+     ["\"resolves …\" line" "Add the resolved question's or action's context."]
+     ["\"answered by / completed by …\" line" "Add the resolver's context."]
+     ["\"standing under …\" line" "Add the standing Know's anchor context."]
+     ["Lens chips (Showing …)" "Each active lens is a chip; × drops just that lens, Show all resets."])
+    (help-group
+     "Author"
+     ["New node" "Create a root; the kind button (Done / Know / To Know / To Do) commits it."]
+     ["Card body text" "Click to open or close the node's actions."]
+     ["Edit text / Save text" "Rewrite the node's body in place."]
+     ["Add node → kind button" "Spawn a child from this node; \"More links…\" adds a second parent, a resolves edge, an artifact reference, or pins a standing Know."]
+     ["\"…answers / completes an existing…\"" "Link this Know or Done to an open item after the fact."]
+     ["Record done (on a To Do)" "One step: creates the Done, optional note as its body, closes the To Do."]
+     ["Awaiting synthesis / Record Know" "On a pending Done (open its actions), a Know form pre-filled with a canned conclusion; accept it as-is or say what you actually learned."]
+     ["Reopen / Blocked / Cancelled" "Move an open question or action between statuses."])
+    (help-group
+     "Panels"
+     ["Changes" "Authored event feed; type your saved bookmark cursor to see only what happened after it."]
+     ["LLM view" "The exact rendering a model reads over nREPL."]
+     ["Inspect (inside node actions)" "Canonical alias and UUID, plus resolved-by edges."])]])
+
 (defn main-view []
   (let [{:keys [graph notice]} @state
         topology (progress/topology graph)
@@ -611,7 +675,7 @@
              :resolution-targets (into #{} (mapcat :resolves) (:nodes topology))
              :current-work-ids
              (set (map :id (:nodes (progress/current-work graph))))}]
-    [:main#app {:data-signals__ifmissing "{creatingRoot: false, showingModelView: false, showingChanges: false, changesCursor: '', graphFilter: ''}"}
+    [:main#app {:data-signals__ifmissing "{creatingRoot: false, showingModelView: false, showingChanges: false, showingHelp: false, changesCursor: '', graphFilter: ''}"}
      [:section.hero
       [:p.eyebrow "dj.ai.tooling / dev"]
       [:h1 "Progress graph builder"]
@@ -620,7 +684,6 @@
        [:aside.notice {:data-level (name (:level notice))} (:message notice)])
      (frontier-summary alias-of frontier)
      [:div {:data-show "$creatingRoot"} (root-form graph)]
-     (synthesis-inbox graph)
      [:section.graph
       [:div.section-heading
        [:h2 "Topology"]
@@ -638,7 +701,12 @@
          "LLM view"]
         [:button.mode-switch {:type "button"
                               :data-on:click "$creatingRoot = true"}
-         "New node"]]]
+         "New node"]
+        [:button.mode-switch {:type "button"
+                              :title "Cheat sheet of every clickable gesture"
+                              :data-on:click "$showingHelp = !$showingHelp"}
+         "Help"]]]
+      (help-panel)
       [:section.model-view {:data-show "$showingModelView"}
        [:div.control-heading
         [:span "Raw LLM rendered view"]
@@ -687,7 +755,7 @@
   .check-field { display: flex; align-items: center; gap: .5rem; font-size: .85rem; }
   .hint { font-size: .8rem; margin: 1rem 0 0; }
   .kind-actions { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .8rem; } .kind-actions button[data-kind=know] { border-color: #5a9c70; } .kind-actions button[data-kind=done] { border-color: #5287aa; }
-  .graph, .inbox { margin-top: 2.5rem; } .section-heading { margin-bottom: 1rem; color: #a6a8ae; } .section-heading h2 { color: #e8e9eb; }
+  .graph { margin-top: 2.5rem; } .section-heading { margin-bottom: 1rem; color: #a6a8ae; } .section-heading h2 { color: #e8e9eb; }
   .heading-actions { display: flex; align-items: center; gap: .7rem; } .mode-switch { min-width: 4rem; }
   .node-list { --row-gap: 1rem; display: grid; gap: var(--row-gap); align-items: start; padding: .5rem; } .node-card { position: relative; flex: 1 1 auto; min-width: 0; max-width: 48rem; background: #17181c; border: 1px solid #2b2d33; border-left: .3rem solid #778079; border-radius: .75rem; padding: 1rem; }
   .node-row { display: flex; align-items: stretch; } .node-row[data-section-start=true] { margin-top: 1.65rem; } .node-row:first-child { margin-top: 0; }
@@ -695,7 +763,7 @@
   .rail[data-cell=rail]::before, .rail[data-cell=branch]::before { content: ''; position: absolute; left: var(--rail-x); top: calc(-1 * var(--row-gap)); bottom: calc(-1 * var(--row-gap)); border-left: 2px solid #484b53; }
   .rail[data-cell=branch]::after, .rail[data-cell=last-branch]::after { content: ''; position: absolute; left: var(--rail-x); right: -.05rem; top: calc(-1 * var(--row-gap)); height: calc(var(--row-gap) + 1rem); border-left: 2px solid #484b53; border-bottom: 2px solid #484b53; border-bottom-left-radius: .55rem; }
   .node-row[data-chain=true] .node-card::before { content: ''; position: absolute; left: 1.1rem; top: calc(-1 * var(--row-gap) - 1px); height: calc(var(--row-gap) + 1px); border-left: 2px solid #484b53; }
-  .node-heading { display: flex; align-items: center; gap: .5rem; } .alias { display: inline-grid; place-items: center; min-width: 1.45rem; height: 1.45rem; padding: 0 .35rem; border-radius: 999px; background: #2a2c32; color: #c7c9ce; font-size: .7rem; font-weight: 800; }
+  .node-heading { display: flex; align-items: center; gap: .5rem; } .alias { display: inline-grid; place-items: center; min-width: 1.45rem; height: 1.45rem; padding: 0 .35rem; border: 0; border-radius: 999px; background: #2a2c32; color: #c7c9ce; font-size: .7rem; font-weight: 800; cursor: pointer; } button.alias:hover { background: #3a3d45; }
   .node-card-actions { display: flex; align-items: center; gap: .35rem; }
   .edit-text, .add-node { border: 0; background: transparent; padding: .2rem .35rem; color: #a6a8ae; font-size: .72rem; }
   .node-card[data-kind=know] { border-left-color: #8fdda9; } .node-card[data-kind=done] { border-left-color: #6eafdf; } .node-card[data-kind=to-know] { border-left-color: #dbb167; } .node-card[data-kind=to-do] { border-left-color: #d77c7c; }
@@ -707,26 +775,39 @@
   .id { display: block; color: #75787f; font-size: .68rem; overflow-wrap: anywhere; margin: .55rem 0; }
   .edges { color: #a6a8ae; font-size: .75rem; margin-top: .25rem; } .edges span { color: #75787f; margin-right: .45rem; }
   .lineage { margin: .5rem 0; display: grid; gap: .25rem; } .from-line, .resolve-line { position: relative; color: #a6a8ae; font-size: .72rem; padding: 0 0 0 1rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .from-line, .resolve-line, .resolved-by-line, .pin-line { border: 0; background: transparent; width: 100%; text-align: left; cursor: pointer; }
-  .from-line:hover, .resolve-line:hover, .resolved-by-line:hover, .pin-line:hover { color: #fff; }
+  .from-line, .resolve-line, .resolved-by-line, .pin-line, .synthesis-badge { border: 0; background: transparent; width: 100%; text-align: left; cursor: pointer; }
+  .from-line:hover, .resolve-line:hover, .resolved-by-line:hover, .pin-line:hover, .synthesis-badge:hover { color: #fff; }
   .from-line:before, .resolve-line:before, .resolved-by-line:before { content: ''; position: absolute; left: 0; top: .55em; width: .7rem; border-top: 2px dashed #6eafdf; } .from-line:before { border-color: #8fdda9; } .from-line span, .resolve-line span, .resolved-by-line span { color: #75787f; margin-right: .35rem; }
   .resolved-by-line { position: relative; color: #a6a8ae; font-size: .72rem; padding: 0 0 0 1rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .pin-line, .synthesis-badge { color: #8ab4f8; font-size: .72rem; margin: .4rem 0; padding: 0; } .synthesis-badge { color: #dbb167; }
   .inspector { color: #75787f; font-size: .72rem; margin: .5rem 0; } .inspector summary, .join summary { cursor: pointer; }
   .local-editor { border-top: 1px solid #2b2d33; padding-top: .75rem; margin-top: .75rem; } .local-editor textarea { background: #f7f8fa; min-height: 6rem; }
   .body-editor { display: grid; grid-template-columns: 1fr auto; align-items: end; gap: .45rem; margin-top: .65rem; }
+  .synthesize-editor { display: grid; grid-template-columns: 1fr auto; align-items: end; gap: .45rem; border-top: 1px solid #2b2d33; padding-top: .75rem; margin-top: .75rem; }
+  .synthesize-editor .composer-label { grid-column: 1 / -1; margin-bottom: 0; }
+  .synthesize-editor textarea { min-height: 3.4rem; }
   .body-editor textarea { min-height: 4rem; }
   .composer-label { margin-bottom: .4rem; color: #b6b9bf; font-size: .75rem; font-weight: 700; }
   main { padding-top: 2rem; } .hero { margin-bottom: 1rem; } .hero h1 { font-size: clamp(2rem, 5vw, 3.4rem); }
   .graph { margin-top: 1.25rem; } .node-list { --row-gap: .4rem; padding-top: 0; }
   .node-card { padding: .55rem .75rem; border-radius: .45rem; max-width: 60rem; }
   .body { font-size: .95rem; margin: .35rem 0 .2rem; } .lineage { margin: .2rem 0; }
+  .artifacts { margin: .2rem 0; display: grid; gap: .25rem; }
+  .artifact-line { position: relative; color: #c9b380; font-size: .72rem; padding: 0 0 0 1rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .artifact-line:before { content: ''; position: absolute; left: 0; top: .55em; width: .7rem; border-top: 2px solid #c9b380; }
+  .artifact-line span { color: #75787f; margin-right: .35rem; }
   .node-content { cursor: pointer; } .node-content:hover .body { color: #fff; }
   .node-controls { border-top: 1px solid #3b3e45; margin-top: .65rem; padding-top: .4rem; }
   .control-heading { display: flex; align-items: center; justify-content: space-between; color: #8ab4f8; font-size: .72rem; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; }
   .model-view { margin-bottom: 1rem; padding: .8rem; border: 1px solid #464c5c; border-radius: .65rem; background: #0b0c0e; }
   .model-view pre { margin: .7rem 0 0; color: #d6d8dc; font: .76rem/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
   .changes-view { margin-bottom: 1rem; padding: .8rem; border: 1px solid #464c5c; border-radius: .65rem; background: #0b0c0e; }
+  .help-view { margin-bottom: 1rem; padding: .8rem; border: 1px solid #464c5c; border-radius: .65rem; background: #0b0c0e; }
+  .help-columns { display: grid; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); gap: 1rem; margin-top: .8rem; }
+  .help-group h3 { margin: 0 0 .45rem; color: #8ab4f8; font-size: .78rem; text-transform: uppercase; letter-spacing: .08em; }
+  .help-row { display: grid; grid-template-columns: 11rem 1fr; gap: .6rem; padding: .3rem 0; border-top: 1px solid #1d1f26; font-size: .78rem; }
+  .help-gesture { color: #e8e9eb; font-weight: 600; }
+  .help-effect { color: #a6a8ae; }
   .cursor-field { display: flex; align-items: center; gap: .6rem; margin: .7rem 0 .4rem; color: #a6a8ae; font-size: .76rem; }
   .cursor-field input { width: 7rem; background: #17181c; color: #e8e9eb; border-color: #464c5c; padding: .35rem .5rem; }
   .change-list { margin: .4rem 0 0; padding: 0; list-style: none; display: grid; gap: .15rem; }
@@ -743,7 +824,6 @@
   .join { margin-top: .65rem; color: #a6a8ae; font-size: .75rem; } .join .field { margin-top: .5rem; }
   .complete-editor { display: grid; grid-template-columns: 1fr auto; gap: .45rem; margin-top: .7rem; } .complete-editor input { min-width: 0; }
   .resolve-existing { border-top: 1px solid #2b2d33; margin-top: .7rem; padding-top: .6rem; } .resolve-row { display: grid; grid-template-columns: 1fr auto; gap: .45rem; } .resolve-row select { min-width: 0; }
-  .inbox-item { display: flex; justify-content: space-between; gap: 1rem; align-items: center; padding: .8rem; border: 1px solid #4b4029; background: #211d15; border-radius: .65rem; margin-bottom: .5rem; }
   .status-actions { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .8rem; } .status-actions button { font-size: .72rem; padding: .35rem .5rem; }
   .empty-state { border: 1px dashed #45484f; border-radius: .75rem; padding: 3rem 1rem; text-align: center; color: #84878e; }
   @media (max-width: 700px) { main { padding-top: 2rem; } .frontier, .form-grid { grid-template-columns: 1fr; } .body-field { grid-column: auto; } .form-heading { align-items: flex-end; } .rail { --rail-x: .25rem; width: .65rem; } }
@@ -825,6 +905,13 @@
                                    :author ui-author})
              "Done recorded.")))
 
+(defn- synthesize! [request]
+  (let [node-id (get-in request [:query-params "node"])
+        body (get (fused/signals request)
+                  (keyword (signal-name "synth" node-id)))]
+    (commit! #(progress/spawn % #{node-id} (node-value :know body))
+             "Synthesis recorded.")))
+
 (defn- edit-body! [request]
   (let [node-id (get-in request [:query-params "node"])
         body (get (fused/signals request)
@@ -856,6 +943,7 @@
     [:post "/add-root"] (add-root! request)
     [:post "/spawn"] (spawn-node! request)
     [:post "/complete"] (complete! request)
+    [:post "/synthesize"] (synthesize! request)
     [:post "/edit-body"] (edit-body! request)
     [:post "/resolve-existing"] (resolve-existing! request)
     [:post "/set-status"] (set-status! request)
