@@ -341,11 +341,18 @@
     (when allow-empty? [:option {:value ""} "None"])
     (map option nodes)]])
 
+(def ^:private default-root-layer
+  "Spawns inherit their parent's layer, so the root form was the one path
+  that silently landed nodes in the unnamed default layer; roots therefore
+  default to Brent's working layer (RI 92/93 decision)."
+  "brent-work")
+
 (defn- root-form [graph]
   (let [nodes (ordered-nodes graph)]
     [:form.editor.root-editor
      {:data-signals__ifmissing
-      "{rootBody: '', rootResolvesId: '', rootPinnedUnder: '', rootArtifact: '', rootLayer: ''}"}
+      (str "{rootBody: '', rootResolvesId: '', rootPinnedUnder: '',"
+           " rootArtifact: '', rootLayer: '" default-root-layer "'}")}
      [:div.form-heading
       [:div
        [:p.eyebrow "Graph-level capture"]
@@ -368,7 +375,8 @@
                   :data-on:click (str "@post('/add-root?kind=" (name kind)
                                       "'); $creatingRoot = false; $rootBody = '';"
                                       " $rootResolvesId = ''; $rootPinnedUnder = '';"
-                                      " $rootArtifact = ''; $rootLayer = ''")}
+                                      " $rootArtifact = ''; $rootLayer = '"
+                                      default-root-layer "'")}
          (get kind-labels kind)])
       [:button {:type "button" :data-on:click "$creatingRoot = false"}
        "Cancel"]]]))
@@ -676,7 +684,19 @@
                                          "&status=" (name status) "')")}
             (get status-labels status)])])]]]))
 
-(defn- frontier-group [alias-of filter-value label nodes]
+(defn- inbox-visibility
+  "JS for one frontier-inbox item: an active layer lens narrows the inboxes
+  to that layer; with no layer lens active every item shows. Nil (always
+  visible) when the graph has no named layers."
+  [graph node]
+  (when-let [names (seq (layer-names graph))]
+    (str "("
+         (str/join " && " (map #(str "!" (token-test (str "layer:" %))) names))
+         ")"
+         (when-let [layer (get-in graph [:nodes (:id node) :layer])]
+           (filter-clause (layer-token layer))))))
+
+(defn- frontier-group [graph alias-of filter-value label nodes]
   [:section.frontier-group
    [:button.frontier-heading
     {:type "button" :data-on:click (set-filter-action filter-value)}
@@ -684,19 +704,20 @@
    (if (seq nodes)
      [:ol.frontier-items
       (for [node nodes]
-        [:li [:button {:type "button"
-                       :title "Show this item in its graph context"
-                       :data-on:click (set-filter-action (str "context:" (:id node)))}
-              (str (alias-of (:id node)) " · " (:body node))]])]
+        [:li {:data-show (inbox-visibility graph node)}
+         [:button {:type "button"
+                   :title "Show this item in its graph context"
+                   :data-on:click (set-filter-action (str "context:" (:id node)))}
+          (str (alias-of (:id node)) " · " (:body node))]])]
      [:p.frontier-empty "None"])])
 
-(defn- frontier-summary [alias-of frontier]
+(defn- frontier-summary [graph alias-of frontier]
   (let [{:keys [to-knows to-dos unsynthesized-dones untriaged-knows]} frontier]
     [:section.frontier
-     (frontier-group alias-of "questions" "open questions" to-knows)
-     (frontier-group alias-of "actions" "open actions" to-dos)
-     (frontier-group alias-of "synthesis" "results to review" unsynthesized-dones)
-     (frontier-group alias-of "triage" "captures to triage" untriaged-knows)]))
+     (frontier-group graph alias-of "questions" "open questions" to-knows)
+     (frontier-group graph alias-of "actions" "open actions" to-dos)
+     (frontier-group graph alias-of "synthesis" "results to review" unsynthesized-dones)
+     (frontier-group graph alias-of "triage" "captures to triage" untriaged-knows)]))
 
 (defn- change-row
   "One authored (or legacy-capture) event; visibility is client-side so the
@@ -839,11 +860,11 @@
      ["\"answered by / completed by …\" line" "Add the resolver's context."]
      ["\"standing under …\" line" "Add the standing Know's anchor context."]
      ["Focus alias box (above the graph)" "Type any alias (K7, Q3, …) and press Enter — or pick from the suggestions — to add that node's context without hunting for it."]
-     ["\"layer: name\" button" "Add every node in that named layer to the view; while the lens is active, that layer's alias chips drop their layer/ prefix."]
+     ["\"layer: name\" button" "Add every node in that named layer to the view; while the lens is active, that layer's alias chips drop their layer/ prefix and the frontier inboxes list only that layer's items (headline counts stay graph-wide)."]
      ["Lens chips (Showing …)" "Each active lens is a chip; × drops just that lens, Show all resets."])
     (help-group
      "Author"
-     ["New node" "Create a root; the kind button (Done / Know / To Know / To Do) commits it."]
+     ["New node" "Create a root; the kind button (Done / Know / To Know / To Do) commits it. The layer field defaults to brent-work — change or clear it to land the root elsewhere."]
      ["Card body text" "Click to open or close the node's actions."]
      ["Edit text / Save text" "Rewrite the node's body in place."]
      ["Add node → kind button" "Spawn a child from this node; \"More links…\" adds a second parent, a resolves edge, an artifact reference, a layer (defaulting to the parent's), or pins a standing Know."]
@@ -882,7 +903,7 @@
       [:p "Manually exercise the graph primitives. State lives only in this process."]]
      (when notice
        [:aside.notice {:data-level (name (:level notice))} (:message notice)])
-     (frontier-summary alias-of frontier)
+     (frontier-summary graph alias-of frontier)
      [:div {:data-show "$creatingRoot"} (root-form graph)]
      [:section.graph
       [:div.section-heading

@@ -637,3 +637,19 @@
     (is (= :relayer (get-in @builder/state [:last-event :op])))
     (is (= [(:id node)] (get-in @builder/state [:last-event :node-ids])))
     (is (= (:id node) (builder/resolve-id "agent-work/K1")))))
+
+(deftest root-form-layer-defaults-to-brent-work
+  (builder/record! {:kind :know :body "Any node."})
+  (let [body (:body (builder/app {:request-method :get :uri "/"}))]
+    (is (str/includes? body "rootLayer: &apos;brent-work&apos;"))
+    (is (str/includes? body "$rootLayer = &apos;brent-work&apos;"))))
+
+(deftest layer-lens-narrows-the-frontier-inboxes
+  (builder/record! {:kind :to-know :body "Design question." :layer :design})
+  (builder/record! {:kind :to-know :body "Unlayered question."})
+  (let [body (:body (builder/app {:request-method :get :uri "/"}))
+        t "(&apos; &apos;+$graphFilter+&apos; &apos;).includes(&apos; layer:design &apos;)"]
+    ;; the layered inbox item stays listed under its own layer lens
+    (is (str/includes? body (str "<li data-show=\"(!" t ") || " t "\">")))
+    ;; the unlayered inbox item hides whenever any layer lens is active
+    (is (str/includes? body (str "<li data-show=\"(!" t ")\">")))))
