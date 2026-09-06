@@ -652,6 +652,36 @@
          label [:span.chip-x "×"]])]
      [:button {:type "button" :data-on:click "$graphFilter = ''"} "Show all"]]))
 
+(defn- focus-entry
+  "Free-typed alias → context lens, so a focus chip can be added without
+  hunting for the node in a list. The alias→token map is server-rendered into
+  the handler expression (the client stays dumb per dj.web guidance); Enter or
+  picking from the datalist adds the chip and clears the box, an unknown alias
+  leaves the text in place as feedback."
+  [{:keys [graph alias-of]}]
+  (let [alias-map (str "({"
+                       (str/join ","
+                                 (for [node-id (:order graph)]
+                                   (str "'" (alias-of node-id)
+                                        "':'context:" node-id "'")))
+                       "})")
+        add-typed (str "((m) => { const t = m[$focusEntry.trim().toUpperCase()];"
+                       " if (t) {"
+                       " if (!(' '+$graphFilter+' ').includes(' '+t+' '))"
+                       " { $graphFilter = ($graphFilter ? $graphFilter + ' ' : '') + t }"
+                       " $focusEntry = '' } })(" alias-map ")")]
+    [:label.focus-entry
+     [:input {:data-bind "focusEntry"
+              :list "focus-aliases"
+              :placeholder "Focus alias…"
+              :title "Type a node alias (K7, Q3, …) and press Enter to add its context to the view"
+              :data-on:keydown (str "evt.key === 'Enter' && (" add-typed ")")
+              :data-on:change add-typed}]
+     [:datalist {:id "focus-aliases"}
+      (for [node-id (:order graph)]
+        [:option {:value (alias-of node-id)}
+         (short-body graph node-id)])]]))
+
 (defn- changes-panel
   "Browser lens over changes-since. The bookmark cursor is what a reconnecting
   agent saves; typing a saved cursor shows only the events after it."
@@ -697,6 +727,7 @@
      ["\"resolves …\" line" "Add the resolved question's or action's context."]
      ["\"answered by / completed by …\" line" "Add the resolver's context."]
      ["\"standing under …\" line" "Add the standing Know's anchor context."]
+     ["Focus alias box (Topology header)" "Type any alias (K7, Q3, …) and press Enter — or pick from the suggestions — to add that node's context without hunting for it."]
      ["Lens chips (Showing …)" "Each active lens is a chip; × drops just that lens, Show all resets."])
     (help-group
      "Author"
@@ -731,7 +762,7 @@
              :resolution-targets (into #{} (mapcat :resolves) (:nodes topology))
              :current-work-ids
              (set (map :id (:nodes (progress/current-work graph))))}]
-    [:main#app {:data-signals__ifmissing "{creatingRoot: false, showingModelView: false, showingChanges: false, showingHelp: false, changesCursor: '', graphFilter: ''}"}
+    [:main#app {:data-signals__ifmissing "{creatingRoot: false, showingModelView: false, showingChanges: false, showingHelp: false, changesCursor: '', graphFilter: '', focusEntry: ''}"}
      [:section.hero
       [:p.eyebrow "dj.ai.tooling / dev"]
       [:h1 "Progress graph builder"]
@@ -745,6 +776,7 @@
        [:h2 "Topology"]
        [:div.heading-actions
         [:span (str (count nodes) (if (= 1 (count nodes)) " node" " nodes"))]
+        (focus-entry env)
         [:button.mode-switch {:type "button"
                               :title "Show only the live frontier and its explanatory ancestry"
                               :data-on:click (set-filter-action "current-work")}
@@ -813,6 +845,7 @@
   .kind-actions { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .8rem; } .kind-actions button[data-kind=know] { border-color: #5a9c70; } .kind-actions button[data-kind=done] { border-color: #5287aa; }
   .graph { margin-top: 2.5rem; } .section-heading { margin-bottom: 1rem; color: #a6a8ae; } .section-heading h2 { color: #e8e9eb; }
   .heading-actions { display: flex; align-items: center; gap: .7rem; } .mode-switch { min-width: 4rem; }
+  .focus-entry input { width: 8rem; background: #17181c; color: #e8e9eb; border-color: #464c5c; padding: .35rem .5rem; font-size: .76rem; }
   .node-list { --row-gap: 1rem; display: grid; gap: var(--row-gap); align-items: start; padding: .5rem; } .node-card { position: relative; flex: 1 1 auto; min-width: 0; max-width: 48rem; background: #17181c; border: 1px solid #2b2d33; border-left: .3rem solid #778079; border-radius: .75rem; padding: 1rem; }
   .node-row { display: flex; align-items: stretch; } .node-row[data-section-start=true] { margin-top: 1.65rem; } .node-row:first-child { margin-top: 0; }
   .rails { display: flex; flex: none; } .rail { --rail-x: .6rem; position: relative; width: 1.4rem; }
