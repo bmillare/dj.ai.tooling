@@ -253,6 +253,55 @@
                   (update-in [:spawn-children parent-id] (fnil conj []) child-id)))
             graph parents)))
 
+(defn unlink
+  "Removes existing spawn-provenance edges from parents to a child — the
+  inverse of `link`, for lineage recorded in error. Provenance only: no
+  statuses change. Rejects edges that are not present."
+  [graph child-id parent-ids]
+  (let [child (require-node graph child-id :unlink-child)
+        parents (set parent-ids)]
+    (doseq [parent-id parents]
+      (require-node graph parent-id :spawn-parent)
+      (when-not (contains? (:spawned-by child) parent-id)
+        (fail "Spawn edge does not exist."
+              {:child-id child-id :parent-id parent-id})))
+    (reduce (fn [g parent-id]
+              (-> g
+                  (update-in [:nodes child-id :spawned-by] disj parent-id)
+                  (update-in [:spawn-children parent-id]
+                             (fn [ids] (into [] (remove #{child-id}) ids)))))
+            graph parents)))
+
+(defn remove-node
+  "Removes a mistakenly recorded node that nothing else depends on. Rejects
+  nodes with spawn children, nodes that resolve others (their closure would
+  lose its provenance), nodes that have been resolved, and nodes that anchor
+  standing context. Incoming spawn provenance is cleaned from the parents'
+  child lists. Removal shifts the computed aliases of later same-kind nodes."
+  [graph node-id]
+  (let [value (require-node graph node-id :removal-target)]
+    (when-let [child-ids (seq (get-in graph [:spawn-children node-id]))]
+      (fail "Cannot remove a node with spawn children."
+            {:node-id node-id :child-ids (vec child-ids)}))
+    (when (seq (:resolves value))
+      (fail "Cannot remove a node that resolves others."
+            {:node-id node-id :resolves (:resolves value)}))
+    (when-let [resolver-ids (seq (get-in graph [:resolved-by node-id]))]
+      (fail "Cannot remove a node that has been resolved."
+            {:node-id node-id :resolver-ids (vec resolver-ids)}))
+    (when-let [pinned-id (some #(when (= node-id (:pinned-under (node graph %))) %)
+                               (:order graph))]
+      (fail "Cannot remove a node that anchors standing context."
+            {:node-id node-id :pinned-node-id pinned-id}))
+    (-> (reduce (fn [g parent-id]
+                  (update-in g [:spawn-children parent-id]
+                             (fn [ids] (into [] (remove #{node-id}) ids))))
+                graph (:spawned-by value))
+        (update :nodes dissoc node-id)
+        (update :order (fn [order] (into [] (remove #{node-id}) order)))
+        (update :spawn-children dissoc node-id)
+        (update :resolved-by dissoc node-id))))
+
 (defn- scope-node-ids [graph scope-id]
   (when scope-id
     (require-node graph scope-id :scope)

@@ -242,6 +242,39 @@
     (subscribed/mark-dirty! subscriptions)
     (some #(when (= child-id (:id %)) %) (:nodes (topology)))))
 
+(defn unlink!
+  "Removes after-the-fact spawn-provenance edges from existing parents to an
+  existing child, e.g. (unlink! \"K47\" [\"D8\"]) — the inverse of `link!`,
+  for lineage recorded in error. Provenance only: no statuses change.
+  Requires `identify!` first."
+  [child-id parent-ids]
+  (let [graph (:graph @state)
+        child-id (progress/resolve-id graph child-id)
+        parent-ids (mapv (partial progress/resolve-id graph) parent-ids)
+        author (repl-author!)]
+    (transact! #(-> %
+                    (update :graph progress/unlink child-id parent-ids)
+                    (author-event author :unlink
+                                  {:node-ids (into [child-id] parent-ids)})))
+    (subscribed/mark-dirty! subscriptions)
+    (some #(when (= child-id (:id %)) %) (:nodes (topology)))))
+
+(defn remove!
+  "Removes a mistakenly recorded node that nothing else depends on: no spawn
+  children, no resolution edges in either direction, anchors no standing
+  context. Later same-kind aliases shift down. Requires `identify!` first."
+  [node-id]
+  (let [graph (:graph @state)
+        node-id (progress/resolve-id graph node-id)
+        removed (progress/node graph node-id)
+        node-alias (get-in (progress/aliases graph) [:id->alias node-id])
+        author (repl-author!)]
+    (transact! #(-> %
+                    (update :graph progress/remove-node node-id)
+                    (author-event author :remove {:node-ids [node-id]})))
+    (subscribed/mark-dirty! subscriptions)
+    {:removed node-alias :id node-id :body (:body removed)}))
+
 (defn attribute!
   "Backfills known provenance onto an existing node, e.g.
   (attribute! id {:actor :brent}). The attribution itself is a write, so

@@ -179,6 +179,48 @@
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"does not exist"
                           (progress/link graph :finding [:missing])))))
 
+(deftest unlink-removes-spawn-provenance-only
+  (let [graph (-> (progress/empty-graph)
+                  (add :root :know "Root" [] 0)
+                  (add :done :done "Session ran." [:root] 1)
+                  (add :finding :know "Finding captured elsewhere." [:root] 2)
+                  (progress/link :finding [:done]))
+        unlinked (progress/unlink graph :finding [:done])]
+    (is (= #{:root} (:spawned-by (progress/node unlinked :finding))))
+    (is (= [] (mapv :id (progress/children unlinked :done))))
+    (is (= :open (:status (progress/node unlinked :finding)))
+        "unlinking is provenance only; statuses stay untouched")
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Spawn edge does not exist"
+                          (progress/unlink unlinked :finding [:done])))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"node does not exist"
+                          (progress/unlink graph :finding [:missing])))))
+
+(deftest remove-node-guards-dependents-and-cleans-provenance
+  (let [graph (-> (progress/empty-graph)
+                  (add :root :know "Root" [] 0)
+                  (add :question :to-know "Question?" [:root] 1)
+                  (add :stray :know "Mis-recorded." [:root] 2))]
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"spawn children"
+                          (progress/remove-node graph :root)))
+    (let [removed (progress/remove-node graph :stray)]
+      (is (nil? (progress/node removed :stray)))
+      (is (= [:question] (mapv :id (progress/children removed :root))))
+      (is (= [:root :question] (:order removed))))
+    (let [resolved (progress/add-node graph
+                                      {:id :answer :kind :know :body "Answer."
+                                       :resolves [:question]
+                                       :created-at #inst "2026-09-05"})]
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"resolves others"
+                            (progress/remove-node resolved :answer)))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"has been resolved"
+                            (progress/remove-node resolved :question))))
+    (let [pinned (progress/add-node graph
+                                    {:id :context :kind :know :body "Context."
+                                     :pinned-under :stray
+                                     :created-at #inst "2026-09-05"})]
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"standing context"
+                            (progress/remove-node pinned :stray))))))
+
 (deftest node-creation-populates-reverse-resolution-index
   (let [graph (-> (progress/empty-graph)
                   (add :q :to-know "Question?" [] 0)

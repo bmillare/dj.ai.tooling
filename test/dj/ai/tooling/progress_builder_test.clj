@@ -166,6 +166,23 @@
     (is (contains? (set (:spawned-by linked)) (:id done)))
     (is (str/includes? (builder/changes-since-view 3) "link K2, D1"))))
 
+(deftest unlink!-and-remove!-accept-aliases-and-record-authored-events
+  (let [_root (builder/record! {:kind :know :body "Root"})
+        done (builder/record! {:kind :done :body "Session ran."
+                               :spawned-by #{"K1"}})
+        finding (builder/record! {:kind :know :body "Finding"
+                                  :spawned-by #{"K1"}})]
+    (builder/link! "K2" [(:alias done)])
+    (let [unlinked (builder/unlink! "K2" ["D1"])]
+      (is (= (:id finding) (:id unlinked)))
+      (is (= #{(builder/resolve-id "K1")} (set (:spawned-by unlinked))))
+      (is (str/includes? (builder/changes-since-view 4) "unlink K2, D1")))
+    (let [removed (builder/remove! "K2")]
+      (is (= "K2" (:removed removed)))
+      (is (= (:id finding) (:id removed)))
+      (is (not-any? #(= (:id finding) (:id %)) (:nodes (builder/topology))))
+      (is (str/includes? (builder/changes-since-view 5) "remove")))))
+
 (deftest ui-cards-and-selectors-carry-canonical-aliases
   (let [root (builder/record! {:kind :know :body "Aliased root"})
         question (builder/record! {:kind :to-know :body "Aliased question"
