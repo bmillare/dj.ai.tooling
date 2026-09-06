@@ -551,3 +551,42 @@
     (is (= [:child] (mapv :id (progress/children graph :root))))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"non-blank"
                           (progress/edit-body graph :root "  ")))))
+
+(deftest layers-scope-aliases-and-validate
+  (let [at #inst "2026-09-04"
+        graph (-> (progress/empty-graph)
+                  (add :k1 :know "Default-layer thought." [] 0)
+                  (progress/add-node {:id :dk1 :kind :know :body "Design thought."
+                                      :layer :design :created-at at})
+                  (progress/add-node {:id :dq1 :kind :to-know :body "Design question?"
+                                      :layer :design :spawned-by #{:k1}
+                                      :created-at at})
+                  (add :k2 :know "Default-layer counting is unaffected." [] 3))
+        {:keys [id->alias]} (progress/aliases graph)]
+    (is (= "K1" (id->alias :k1)))
+    (is (= "K2" (id->alias :k2)))
+    (is (= "design/K1" (id->alias :dk1)))
+    (is (= "design/Q1" (id->alias :dq1)))
+    (is (= :dk1 (progress/resolve-id graph "design/K1")))
+    (is (= #{:design} (progress/layers graph)))
+    (is (= #{} (progress/layers (progress/empty-graph))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"bare keyword"
+                          (progress/add-node graph
+                                             {:id :bad :kind :know :body "String layer"
+                                              :layer "design" :created-at at})))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"bare keyword"
+                          (progress/add-node graph
+                                             {:id :bad2 :kind :know :body "Namespaced layer"
+                                              :layer :nested/design :created-at at})))))
+
+(deftest layered-aliases-render-qualified-across-views
+  (let [at #inst "2026-09-04"
+        graph (-> (progress/empty-graph)
+                  (add :q :to-know "Cross-layer question?" [] 0)
+                  (progress/add-node {:id :dk :kind :know :body "Layered answer."
+                                      :layer :design :spawned-by #{:q}
+                                      :resolves #{:q} :created-at at}))
+        rendered (progress/render-topology (progress/topology graph))]
+    (is (str/includes? rendered "[design/K1] KNOW"))
+    (is (str/includes? rendered "resolves Q1"))
+    (is (= "design/K1" (:alias (progress/node-context graph "design/K1"))))))

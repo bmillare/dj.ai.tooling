@@ -81,9 +81,21 @@
     (fail ":author must be a map of a keyword :actor and optional string :session."
           {:node-id node-id :author author})))
 
+(defn valid-layer?
+  "Layers are named subsets of one graph, acting as alias namespaces. A bare
+  keyword keeps qualified aliases such as \"design/K1\" unambiguous; nesting
+  waits until a real need arrives."
+  [layer]
+  (and (keyword? layer) (nil? (namespace layer))))
+
+(defn- validate-layer [node-id layer]
+  (when-not (valid-layer? layer)
+    (fail ":layer must be a bare keyword such as :design."
+          {:node-id node-id :layer layer})))
+
 (defn- validate-new-node [graph value]
   (let [{:keys [id kind body status spawned-by resolves pinned-under
-                created-at author]} value]
+                created-at author layer]} value]
     (when (nil? id) (fail "Progress node requires :id." {:node value}))
     (when (node graph id)
       (fail "Progress node id already exists." {:node-id id}))
@@ -106,7 +118,9 @@
               {:node-id id :kind kind}))
       (require-node graph pinned-under :pinned-under))
     (when (contains? value :author)
-      (validate-author id author))))
+      (validate-author id author))
+    (when (contains? value :layer)
+      (validate-layer id layer))))
 
 (defn add-node
   "Adds one fully identified node and returns a new graph. Collection fields
@@ -424,17 +438,28 @@
 (def ^:private alias-prefix
   {:done "D" :know "K" :to-know "Q" :to-do "A"})
 
+(defn layers
+  "Returns the set of named layers present in the graph. The default layer
+  (nodes without :layer) is never named here."
+  [graph]
+  (into #{} (keep (comp :layer (partial node graph))) (:order graph)))
+
 (defn aliases
   "Returns the canonical graph-local alias maps. Aliases are derived from the
-  full append-only capture order, so every projection names a node identically."
+  full append-only capture order and counted per (layer, kind), so every
+  projection names a node identically: default-layer nodes as \"K7\", nodes in
+  a named layer qualified as \"design/K1\"."
   [graph]
   (let [id->alias
         (:aliases
          (reduce (fn [{:keys [counts aliases]} node-id]
-                   (let [prefix (alias-prefix (:kind (node graph node-id)))
-                         number (inc (get counts prefix 0))]
-                     {:counts (assoc counts prefix number)
-                      :aliases (assoc aliases node-id (str prefix number))}))
+                   (let [{:keys [kind layer]} (node graph node-id)
+                         prefix (alias-prefix kind)
+                         number (inc (get counts [layer prefix] 0))]
+                     {:counts (assoc counts [layer prefix] number)
+                      :aliases (assoc aliases node-id
+                                      (str (when layer (str (name layer) "/"))
+                                           prefix number))}))
                  {:counts {} :aliases {}}
                  (:order graph)))]
     {:id->alias id->alias

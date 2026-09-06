@@ -567,3 +567,10 @@
                           (builder/resolve! (:id signed) []))))
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"keyword"
                         (builder/identify! {:actor "brent"}))))
+
+(deftest record-accepts-a-layer-and-returns-a-qualified-alias
+  (let [node (builder/record! {:kind :know :body "Layered capture."
+                               :layer :design})]
+    (is (= "design/K1" (:alias node)))
+    (is (= :design (:layer node)))
+    (is (= (:id node) (builder/resolve-id "design/K1")))))

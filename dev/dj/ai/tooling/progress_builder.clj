@@ -190,7 +190,9 @@
 (defn record!
   "Records a node in the live graph and returns its topology projection.
   Generates process concerns (id and timestamp) when callers omit them, and
-  stamps the identity declared via `identify!` unless :author is supplied."
+  stamps the identity declared via `identify!` unless :author is supplied.
+  An optional bare-keyword :layer places the node in a named layer, whose
+  aliases count independently and render qualified (design/K1)."
   [value]
   (let [graph (:graph @state)
         resolve-refs #(into #{} (map (partial progress/resolve-id graph)) %)
@@ -688,7 +690,10 @@
   (let [alias-map (str "({"
                        (str/join ","
                                  (for [node-id (:order graph)]
-                                   (str "'" (alias-of node-id)
+                                   ;; keyed uppercase so the case-folding lookup
+                                   ;; below also finds layer-qualified aliases
+                                   ;; such as design/K1
+                                   (str "'" (str/upper-case (alias-of node-id))
                                         "':'context:" node-id "'")))
                        "})")
         add-typed (str "((m) => { const t = m[$focusEntry.trim().toUpperCase()];"
