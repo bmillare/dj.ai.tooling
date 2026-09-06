@@ -337,10 +337,24 @@
   [graph alias-of node-id]
   (str (alias-of node-id) " · " (short-body graph node-id)))
 
+(def ^:private context-ancestry-hops
+  "Focus shows nearby lineage, not the whole spine: full transitive ancestry
+  made every frontier-adjacent focus converge on the same wall of history
+  (RI 83). Two hops orients; the topmost visible ancestor's own focus gesture
+  climbs two more per click when the deeper story is actually wanted."
+  2)
+
 (defn- context-node-ids [graph focus-id]
-  (into #{focus-id}
-        (concat (map :id (progress/ancestors graph focus-id))
-                (map :id (progress/children graph focus-id)))))
+  (loop [acc #{focus-id}
+         frontier #{focus-id}
+         hops context-ancestry-hops]
+    (if (or (zero? hops) (empty? frontier))
+      (into acc (map :id (progress/children graph focus-id)))
+      (let [parents (into #{}
+                          (comp (mapcat #(:spawned-by (progress/node graph %)))
+                                (remove acc))
+                          frontier)]
+        (recur (into acc parents) parents (dec hops))))))
 
 ;; The graph filter is one client-side signal holding a space-separated SET of
 ;; lens tokens (per dj.web guidance: signals carry only ephemeral view state;
@@ -716,7 +730,7 @@
     (help-group
      "Focus (replaces the view)"
      ["Frontier heading (count)" "Show all open questions, open actions, or results to review."]
-     ["Frontier list item" "Focus that item's context: the node, its ancestry, and its direct children."]
+     ["Frontier list item" "Focus that item's context: the node, two hops of ancestry, and its direct children. Focus the topmost visible ancestor to climb further."]
      ["Open / Blocked status pill" "Same context focus, from the card itself (questions and actions only)."]
      ["Answered / Completed pill" "Show the item together with the outcome that resolved it."]
      ["Current work" "The live frontier plus just enough ancestry to explain it."])
