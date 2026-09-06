@@ -346,6 +346,117 @@
       (fail "Progress node id or alias does not exist."
             {:node-id-or-alias id-or-alias})))
 
+(def ^:private neighbor-preview-chars 160)
+
+(defn- bounded-text [value max-chars]
+  (if (<= (count value) max-chars)
+    value
+    (str (subs value 0 (dec max-chars)) "…")))
+
+(defn- preview-text [value]
+  (bounded-text (str/replace value #"\s+" " ") neighbor-preview-chars))
+
+(defn- effective-status [graph value]
+  (if (and (agenda? value)
+           (= :closed (:status value))
+           (seq (resolved-by graph (:id value))))
+    (case (:kind value) :to-know :answered :to-do :completed)
+    (:status value)))
+
+(defn- alias-summary [graph id->alias value]
+  {:alias (id->alias (:id value))
+   :kind (:kind value)
+   :status (effective-status graph value)
+   :body (preview-text (:body value))})
+
+(defn- ordered-ids [graph ids]
+  (into [] (filter (set ids)) (:order graph)))
+
+(defn- nearest-ancestor-ids [graph node-id]
+  (loop [queue (into clojure.lang.PersistentQueue/EMPTY
+                     (ordered-ids graph (:spawned-by (node graph node-id))))
+         seen #{}
+         result []]
+    (if-let [ancestor-id (peek queue)]
+      (if (seen ancestor-id)
+        (recur (pop queue) seen result)
+        (recur (into (pop queue)
+                     (ordered-ids graph (:spawned-by (node graph ancestor-id))))
+               (conj seen ancestor-id)
+               (conj result ancestor-id)))
+      result)))
+
+(defn node-context
+  "Returns an alias-only, one-hop projection for a node id or alias.
+
+  The focal body and artifact references are complete. Neighbor bodies are
+  whitespace-normalized and bounded to 160 characters with a visible ellipsis."
+  [graph id-or-alias]
+  (let [node-id (resolve-id graph id-or-alias)
+        value (node graph node-id)
+        {:keys [id->alias]} (aliases graph)
+        summarize #(alias-summary graph id->alias %)]
+    (cond-> {:alias (id->alias node-id)
+             :kind (:kind value)
+             :status (effective-status graph value)
+             :body (:body value)
+             :spawned-by (mapv (comp summarize (partial node graph))
+                               (ordered-ids graph (:spawned-by value)))
+             :resolves (mapv (comp summarize (partial node graph))
+                             (ordered-ids graph (:resolves value)))
+             :resolved-by (mapv summarize (resolved-by graph node-id))
+             :children (mapv summarize (children graph node-id))
+             :artifacts (:artifacts value)}
+      (:author value) (assoc :author (:author value))
+      (:pinned-under value) (assoc :pinned-under
+                                   (summarize (node graph (:pinned-under value)))))))
+
+(defn ancestry-context
+  "Returns a bounded, alias-only topology for a node and its spawn ancestry.
+
+  Selection keeps the target and its nearest ancestors; presentation remains
+  capture-stable. Options are positive :max-nodes (default 64) and
+  :max-body-chars (default 2000)."
+  ([graph id-or-alias] (ancestry-context graph id-or-alias {}))
+  ([graph id-or-alias {:keys [max-nodes max-body-chars]
+                       :or {max-nodes 64 max-body-chars 2000}}]
+   (when-not (and (pos-int? max-nodes) (pos-int? max-body-chars))
+     (fail "Ancestry view bounds must be positive integers."
+           {:max-nodes max-nodes :max-body-chars max-body-chars}))
+   (let [target-id (resolve-id graph id-or-alias)
+         ancestor-ids (nearest-ancestor-ids graph target-id)
+         selected (conj (set (take (dec max-nodes) ancestor-ids)) target-id)
+         {:keys [id->alias]} (aliases graph)
+         projected-node
+         (fn [node-id]
+           (let [value (node graph node-id)]
+             (-> value
+                 (assoc :id (id->alias node-id)
+                        :alias (id->alias node-id)
+                        :body (bounded-text (:body value) max-body-chars)
+                        :spawned-by (into #{} (keep #(when (selected %) (id->alias %)))
+                                          (:spawned-by value))
+                        :spawn-children (into [] (comp (map :id) (filter selected)
+                                                       (map id->alias))
+                                              (children graph node-id))
+                        :resolved-by (into [] (comp (map :id) (filter selected)
+                                                   (map id->alias))
+                                           (resolved-by graph node-id))
+                        :resolved? (boolean (seq (resolved-by graph node-id))))
+                 (update :resolves #(into #{} (keep (fn [id]
+                                                      (when (selected id) (id->alias id)))) %))
+                 (update :pinned-under #(when (selected %) (id->alias %))))))
+         nodes (into [] (comp (filter selected) (map projected-node)) (:order graph))]
+     {:target (id->alias target-id)
+      :omitted-ancestor-count (- (count ancestor-ids) (dec (count selected)))
+      :roots (into []
+                   (comp (filter selected)
+                         (filter #(empty? (filter selected (:spawned-by (node graph %)))))
+                         (map id->alias))
+                   (:order graph))
+      :nodes nodes
+      :frontier {}})))
+
 (defn- project-topology [graph node-ids projected-frontier]
   (let [node-ids (set node-ids)
         id->alias (:id->alias (aliases graph))]

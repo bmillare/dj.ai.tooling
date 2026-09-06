@@ -104,6 +104,45 @@
            (set (map :id (progress/ancestors graph :join)))))
     (is (= [:left :right] (mapv :id (progress/children graph :root))))))
 
+(deftest node-context-is-alias-only-one-hop-and-bounded
+  (let [long-body (apply str (repeat 200 "x"))
+        graph (-> (progress/empty-graph)
+                  (add :root :know "Root" [] 0)
+                  (progress/add-node {:id :standing :kind :know :body "Principle"
+                                      :pinned-under :root
+                                      :created-at #inst "2026-09-04T00:01:00Z"})
+                  (add :q :to-know "Question" [:root] 2)
+                  (add :child :know long-body [:q] 3)
+                  (progress/resolve :child [:q]))
+        context (progress/node-context graph "Q1")]
+    (is (= {:alias "Q1" :kind :to-know :status :answered :body "Question"}
+           (select-keys context [:alias :kind :status :body])))
+    (is (= ["K1"] (mapv :alias (:spawned-by context))))
+    (is (= ["K3"] (mapv :alias (:resolved-by context))))
+    (is (= ["K3"] (mapv :alias (:children context))))
+    (is (= 160 (count (get-in context [:children 0 :body]))))
+    (is (str/ends-with? (get-in context [:children 0 :body]) "…"))
+    (is (not (str/includes? (pr-str context) ":root")))
+    (is (= "K1" (get-in (progress/node-context graph "K2")
+                          [:pinned-under :alias])))))
+
+(deftest ancestry-context-preserves-dag-order-and-reports-bounds
+  (let [graph (-> (progress/empty-graph)
+                  (add :root :know "Root" [] 0)
+                  (add :left :to-know "Left" [:root] 1)
+                  (add :right :to-know "Right" [:root] 2)
+                  (add :join :to-do "Joined work" [:left :right] 3))
+        full (progress/ancestry-context graph "A1")
+        bounded (progress/ancestry-context graph "A1" {:max-nodes 2
+                                                        :max-body-chars 4})]
+    (is (= ["K1" "Q1" "Q2" "A1"] (mapv :alias (:nodes full))))
+    (is (= #{"Q1" "Q2"} (:spawned-by (last (:nodes full)))))
+    (is (= 0 (:omitted-ancestor-count full)))
+    (is (= 2 (:omitted-ancestor-count bounded)))
+    (is (= ["Q1" "A1"] (mapv :alias (:nodes bounded))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"positive integers"
+                          (progress/ancestry-context graph "A1" {:max-nodes 0})))))
+
 (deftest maintains-direct-edge-indexes
   (let [graph (-> (progress/empty-graph)
                   (add :root :know "Root" [] 0)

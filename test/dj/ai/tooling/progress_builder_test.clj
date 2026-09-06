@@ -126,6 +126,23 @@
     (is (str/includes? rendered "Agent question"))
     (is (not (str/includes? rendered "Inactive history")))))
 
+(deftest node-and-chain-views-are-bounded-alias-only-text
+  (let [root (builder/record! {:kind :know :body "Root context"})
+        left (builder/record! {:kind :to-know :body "Left question"
+                               :spawned-by #{(:id root)}})
+        right (builder/record! {:kind :to-know :body "Right question"
+                                :spawned-by #{(:id root)}})
+        join (builder/record! {:kind :to-do :body "Join the findings"
+                               :spawned-by #{(:id left) (:id right)}})
+        node-text (builder/node-view "Q1")
+        chain-text (builder/chain-view "A1" {:max-nodes 3 :max-body-chars 2000})]
+    (is (str/includes? node-text "NODE | Q1 · to-know · open"))
+    (is (str/includes? node-text "children: A1 · to-do · Join the findings"))
+    (is (not (str/includes? node-text (:id root))))
+    (is (str/includes? chain-text "ANCESTRY | target A1 | omitted 1 ancestors"))
+    (is (str/includes? chain-text "[A1] TO DO: Join the findings | from Q1, Q2"))
+    (is (not (str/includes? chain-text (:id join))))))
+
 (deftest aliases-are-write-addressable-and-stable-across-current-work
   (let [_old (builder/record! {:kind :know :body "Inactive history"})
         root (builder/record! {:kind :know :body "Live root"})

@@ -148,6 +148,45 @@
   ([opts]
    (progress/render-topology (current-work opts))))
 
+(defn- context-line [label values]
+  (when (seq values)
+    (str "\n" label ": "
+         (str/join "; " (map (fn [{:keys [alias kind body]}]
+                                (str alias " · " (name kind) " · " body))
+                              values)))))
+
+(defn node-view
+  "Returns a bounded, alias-only text view of one node and its neighborhood."
+  [id-or-alias]
+  (let [{:keys [alias kind status body author artifacts pinned-under]
+         :as context}
+        (progress/node-context (:graph @state) id-or-alias)]
+    (str "NODE | " alias " · " (name kind) " · " (name status)
+         (when author (str " | by " (progress/author-label author)))
+         "\n\n" body
+         (context-line "spawned by" (:spawned-by context))
+         (context-line "resolves" (:resolves context))
+         (context-line "resolved by" (:resolved-by context))
+         (context-line "children" (:children context))
+         (when pinned-under
+           (str "\npinned under: " (:alias pinned-under) " · "
+                (name (:kind pinned-under)) " · " (:body pinned-under)))
+         (when (seq artifacts)
+           (str "\nrefs: " (str/join "; " (map :ref artifacts)))))))
+
+(defn chain-view
+  "Returns a bounded text rendering of a node's induced spawn-ancestry DAG."
+  ([id-or-alias] (chain-view id-or-alias {}))
+  ([id-or-alias opts]
+   (let [{:keys [target omitted-ancestor-count] :as context}
+         (progress/ancestry-context (:graph @state) id-or-alias opts)
+         rendered (progress/render-topology context)
+         nodes-text (second (str/split rendered #"\n\n" 2))]
+     (str "ANCESTRY | target " target
+          (when (pos? omitted-ancestor-count)
+            (str " | omitted " omitted-ancestor-count " ancestors"))
+          (when nodes-text (str "\n\n" nodes-text))))))
+
 (defn record!
   "Records a node in the live graph and returns its topology projection.
   Generates process concerns (id and timestamp) when callers omit them, and
