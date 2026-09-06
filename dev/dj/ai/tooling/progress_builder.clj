@@ -277,6 +277,20 @@
     (subscribed/mark-dirty! subscriptions)
     {:removed node-alias :id node-id :body (:body removed)}))
 
+(defn relayer!
+  "Moves an existing node into a named layer, or back to the default layer
+  with nil. Aliases re-scope, so later same-kind aliases in both layers
+  shift — re-check aliases after use. Requires `identify!` first."
+  [node-id layer]
+  (let [graph (:graph @state)
+        node-id (progress/resolve-id graph node-id)
+        author (repl-author!)]
+    (transact! #(-> %
+                    (update :graph progress/set-layer node-id layer)
+                    (author-event author :relayer {:node-ids [node-id]})))
+    (subscribed/mark-dirty! subscriptions)
+    (some #(when (= node-id (:id %)) %) (:nodes (topology)))))
+
 (defn attribute!
   "Backfills known provenance onto an existing node, e.g.
   (attribute! id {:actor :brent}). The attribution itself is a write, so

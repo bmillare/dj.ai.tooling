@@ -444,6 +444,19 @@
   [graph]
   (into #{} (keep (comp :layer (partial node graph))) (:order graph)))
 
+(defn set-layer
+  "Moves one node into a named layer, or back to the default layer with nil.
+  Relayering re-scopes the node's alias and shifts later same-kind aliases in
+  both the source and target layers, so prose written against the old aliases
+  dangles (K64) — callers moving nodes in bulk own recording a mapping."
+  [graph node-id layer]
+  (require-node graph node-id :relayer-target)
+  (when (some? layer)
+    (validate-layer node-id layer))
+  (if layer
+    (assoc-in graph [:nodes node-id :layer] layer)
+    (update-in graph [:nodes node-id] dissoc :layer)))
+
 (defn aliases
   "Returns the canonical graph-local alias maps. Aliases are derived from the
   full append-only capture order and counted per (layer, kind), so every

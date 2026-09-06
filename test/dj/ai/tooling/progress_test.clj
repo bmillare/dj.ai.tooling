@@ -590,3 +590,21 @@
     (is (str/includes? rendered "[design/K1] KNOW"))
     (is (str/includes? rendered "resolves Q1"))
     (is (= "design/K1" (:alias (progress/node-context graph "design/K1"))))))
+
+(deftest set-layer-rescopes-aliases-and-guards-input
+  (let [graph (-> (progress/empty-graph)
+                  (add :k1 :know "First capture." [] 0)
+                  (add :k2 :know "Second capture." [] 1))
+        moved (progress/set-layer graph :k1 :brent-work)
+        {:keys [id->alias]} (progress/aliases moved)]
+    (is (= "brent-work/K1" (id->alias :k1)))
+    ;; the remaining default-layer node renumbers from one
+    (is (= "K1" (id->alias :k2)))
+    (is (= #{:brent-work} (progress/layers moved)))
+    ;; nil moves a node back to the default layer
+    (is (= "K1" (get-in (progress/aliases (progress/set-layer moved :k1 nil))
+                        [:id->alias :k1])))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"bare keyword"
+                          (progress/set-layer graph :k1 "brent-work")))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"does not exist"
+                          (progress/set-layer graph :missing :brent-work)))))

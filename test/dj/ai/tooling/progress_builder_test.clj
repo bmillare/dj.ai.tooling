@@ -628,3 +628,12 @@
   (is (= 1 (count (get-in @builder/state [:graph :order]))))
   (is (= :error (get-in @builder/state [:notice :level])))
   (is (str/includes? (get-in @builder/state [:notice :message]) "lowercase")))
+
+(deftest relayer!-moves-a-node-and-records-an-authored-event
+  (let [node (builder/record! {:kind :know :body "Born in the default layer."})
+        moved (builder/relayer! (:alias node) :agent-work)]
+    (is (= "agent-work/K1" (:alias moved)))
+    (is (= :agent-work (:layer moved)))
+    (is (= :relayer (get-in @builder/state [:last-event :op])))
+    (is (= [(:id node)] (get-in @builder/state [:last-event :node-ids])))
+    (is (= (:id node) (builder/resolve-id "agent-work/K1")))))
