@@ -574,3 +574,57 @@
     (is (= "design/K1" (:alias node)))
     (is (= :design (:layer node)))
     (is (= (:id node) (builder/resolve-id "design/K1")))))
+
+(deftest layer-lens-filters-chips-and-strips-alias-prefixes
+  (builder/record! {:kind :know :body "Default-layer node."})
+  (builder/record! {:kind :know :body "Design-layer node." :layer :design})
+  (let [body (:body (builder/app {:request-method :get :uri "/"}))]
+    ;; entry button plus a removable chip for the named layer
+    (is (str/includes? body "class=\"chip layer-lens\""))
+    (is (str/includes? body ">layer: design<span class=\"chip-x\""))
+    ;; the layered node's row is visible under the layer token
+    (is (str/includes?
+         body
+         "(&apos; &apos;+$graphFilter+&apos; &apos;).includes(&apos; layer:design &apos;)"))
+    ;; alias chip renders qualified by default and stripped under the lens
+    (is (str/includes? body ">design/K1</span>"))
+    (is (str/includes? body ">K1</span>"))
+    ;; the shared datalist offers existing layer names to both forms
+    (is (str/includes? body "<datalist id=\"layer-names\""))
+    (is (str/includes? body "<option value=\"design\""))))
+
+(deftest spawn-form-defaults-to-the-parent-layer
+  (let [parent (builder/record! {:kind :know :body "Design parent."
+                                 :layer :design})
+        parent-id (:id parent)
+        page (:body (builder/app {:request-method :get :uri "/"}))
+        layer-key (signal-id "layer" parent-id)
+        draft-key (signal-id "draft" parent-id)]
+    (is (str/includes? page (str layer-key ": &apos;design&apos;")))
+    (is (= 204 (:status
+                (builder/app
+                 (post-request "/spawn" {"parent" parent-id "kind" "to-do"}
+                               (str "{\"" draft-key "\":\"Follow-up.\",\""
+                                    layer-key "\":\"design\"}"))))))
+    (let [graph (:graph @builder/state)
+          child-id (last (:order graph))]
+      (is (= :design (get-in graph [:nodes child-id :layer])))
+      (is (= "design/A1"
+             (get-in (progress/aliases graph) [:id->alias child-id]))))))
+
+(deftest root-form-accepts-a-layer-and-rejects-malformed-names
+  (is (= 204 (:status
+              (builder/app
+               (post-request "/add-root" {"kind" "know"}
+                             "{\"rootBody\":\"Layered root\",\"rootResolvesId\":\"\",\"rootPinnedUnder\":\"\",\"rootLayer\":\"design\"}")))))
+  (let [graph (:graph @builder/state)
+        node-id (first (:order graph))]
+    (is (= :design (get-in graph [:nodes node-id :layer])))
+    (is (= "design/K1" (get-in (progress/aliases graph) [:id->alias node-id]))))
+  (is (= 204 (:status
+              (builder/app
+               (post-request "/add-root" {"kind" "know"}
+                             "{\"rootBody\":\"Bad layer\",\"rootResolvesId\":\"\",\"rootPinnedUnder\":\"\",\"rootLayer\":\"Not A Layer\"}")))))
+  (is (= 1 (count (get-in @builder/state [:graph :order]))))
+  (is (= :error (get-in @builder/state [:notice :level])))
+  (is (str/includes? (get-in @builder/state [:notice :message]) "lowercase")))

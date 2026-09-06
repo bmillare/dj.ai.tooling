@@ -331,7 +331,7 @@
   (let [nodes (ordered-nodes graph)]
     [:form.editor.root-editor
      {:data-signals__ifmissing
-      "{rootBody: '', rootResolvesId: '', rootPinnedUnder: '', rootArtifact: ''}"}
+      "{rootBody: '', rootResolvesId: '', rootPinnedUnder: '', rootArtifact: '', rootLayer: ''}"}
      [:div.form-heading
       [:div
        [:p.eyebrow "Graph-level capture"]
@@ -344,14 +344,17 @@
       (select-field "Resolves (optional)" "rootResolvesId" nodes {:allow-empty? true})
       (select-field "Pin under (Know only)" "rootPinnedUnder" nodes {:allow-empty? true})
       [:label.field [:span "Artifact reference (optional)"]
-       [:input {:data-bind "rootArtifact" :placeholder "file, URL, commit, or run"}]]]
+       [:input {:data-bind "rootArtifact" :placeholder "file, URL, commit, or run"}]]
+      [:label.field [:span "Layer (optional)"]
+       [:input {:data-bind "rootLayer" :list "layer-names"
+                :placeholder "default"}]]]
      [:div.kind-actions
       (for [kind [:done :know :to-know :to-do]]
         [:button {:type "button" :data-kind (name kind)
                   :data-on:click (str "@post('/add-root?kind=" (name kind)
                                       "'); $creatingRoot = false; $rootBody = '';"
                                       " $rootResolvesId = ''; $rootPinnedUnder = '';"
-                                      " $rootArtifact = ''")}
+                                      " $rootArtifact = ''; $rootLayer = ''")}
          (get kind-labels kind)])
       [:button {:type "button" :data-on:click "$creatingRoot = false"}
        "Cancel"]]]))
@@ -423,11 +426,19 @@
   [token]
   (str "$graphFilter = (' '+$graphFilter+' ').replace(' " token " ', ' ').trim()"))
 
+(defn- layer-token [layer]
+  (str "layer:" (name layer)))
+
+(defn- layer-names [graph]
+  (sort (map name (progress/layers graph))))
+
 (defn- filter-expression
   [{:keys [question-ids action-ids synthesis-ids triage-ids current-work-ids
            resolution-targets contexts]} node]
   (let [node-id (:id node)]
     (str "$graphFilter == ''"
+         (when-let [layer (:layer node)]
+           (filter-clause (layer-token layer)))
          (when (question-ids node-id) (filter-clause "questions"))
          (when (action-ids node-id) (filter-clause "actions"))
          (when (synthesis-ids node-id) (filter-clause "synthesis"))
@@ -450,6 +461,8 @@
         also-from (signal-name "alsoFrom" node-id)
         resolves (signal-name "resolves" node-id)
         artifact (signal-name "artifact" node-id)
+        layer (signal-name "layer" node-id)
+        parent-layer (or (some-> (:layer node) name) "")
         standing (signal-name "standing" node-id)
         done-note (signal-name "doneNote" node-id)
         body-draft (signal-name "bodyDraft" node-id)
@@ -479,7 +492,8 @@
      [:article.node-card {:data-kind (name (:kind node))
                           :data-signals__ifmissing
                           (str "{" draft ": '', " also-from ": '', "
-                               resolves ": '', " artifact ": '', " standing
+                               resolves ": '', " artifact ": '', "
+                               layer ": '" parent-layer "', " standing
                                ": false, " done-note ": '', " body-draft ": "
                                (pr-str (:body node)) ", " editing ": false, "
                                resolve-existing ": ''"
@@ -492,7 +506,14 @@
         [:button.alias
          {:type "button" :title "Add this node's context to the view"
           :data-on:click__stop (add-filter-action (str "context:" node-id))}
-         (:alias node)]
+         (if-let [layer (:layer node)]
+           ;; under the node's own layer lens the qualifier is noise, so the
+           ;; chip drops it; every other rendering stays qualified (K64/K70)
+           (list [:span {:data-show (token-test (layer-token layer))}
+                  (subs (:alias node) (inc (count (name layer))))]
+                 [:span {:data-show (str "!" (token-test (layer-token layer)))}
+                  (:alias node)])
+           (:alias node))]
         [:span.kind (get kind-labels (:kind node))]
         (when-let [author (:author node)]
           [:span.byline (str "~" (progress/author-label author))])]
@@ -595,7 +616,8 @@
                     :data-on:click (str "@post('/spawn?parent=" node-id
                                         "&kind=" (name kind) "'); $" draft " = '';"
                                         " $" also-from " = ''; $" resolves " = '';"
-                                        " $" artifact " = ''; $" standing " = false")}
+                                        " $" artifact " = ''; $" standing " = false;"
+                                        " $" layer " = '" parent-layer "'")}
            (get kind-labels kind)])]
        (when (seq nodes)
          [:details.join
@@ -604,6 +626,9 @@
           (select-field "Resolves" resolves nodes {:allow-empty? true})
           [:label.field [:span "Artifact reference"]
            [:input {:data-bind artifact :placeholder "file, URL, commit, or run"}]]
+          [:label.field [:span "Layer"]
+           [:input {:data-bind layer :list "layer-names"
+                    :placeholder "default"}]]
           [:label.check-field
            [:input {:type "checkbox" :data-bind standing}]
            [:span "Standing Know under this node"]]])]
@@ -722,6 +747,9 @@
   above the graph."
   [{:keys [graph alias-of resolution-targets] :as env}]
   (let [chips (concat base-filter-chips
+                      (for [lname (layer-names graph)]
+                        {:token (str "layer:" lname)
+                         :label (str "layer: " lname)})
                       (for [target-id resolution-targets]
                         {:token (str "resolution:" target-id)
                          :label (str "resolved: " (alias-of target-id))})
@@ -730,6 +758,14 @@
                          :label (str "context: " (alias-of node-id))}))]
     [:div.filter-bar
      (focus-entry env)
+     ;; one entry button per named layer; it hides while its lens is active
+     ;; because the removable chip below then represents the same token
+     (for [lname (layer-names graph)]
+       [:button.chip.layer-lens
+        {:type "button" :title "Add this layer's nodes to the view"
+         :data-show (str "!" (token-test (str "layer:" lname)))
+         :data-on:click (add-filter-action (str "layer:" lname))}
+        (str "layer: " lname)])
      [:div.filter-chips {:data-show "$graphFilter != ''"}
       [:span.filter-chips-label "Showing"]
       (for [{:keys [token label]} chips]
@@ -789,13 +825,14 @@
      ["\"answered by / completed by …\" line" "Add the resolver's context."]
      ["\"standing under …\" line" "Add the standing Know's anchor context."]
      ["Focus alias box (above the graph)" "Type any alias (K7, Q3, …) and press Enter — or pick from the suggestions — to add that node's context without hunting for it."]
+     ["\"layer: name\" button" "Add every node in that named layer to the view; while the lens is active, that layer's alias chips drop their layer/ prefix."]
      ["Lens chips (Showing …)" "Each active lens is a chip; × drops just that lens, Show all resets."])
     (help-group
      "Author"
      ["New node" "Create a root; the kind button (Done / Know / To Know / To Do) commits it."]
      ["Card body text" "Click to open or close the node's actions."]
      ["Edit text / Save text" "Rewrite the node's body in place."]
-     ["Add node → kind button" "Spawn a child from this node; \"More links…\" adds a second parent, a resolves edge, an artifact reference, or pins a standing Know."]
+     ["Add node → kind button" "Spawn a child from this node; \"More links…\" adds a second parent, a resolves edge, an artifact reference, a layer (defaulting to the parent's), or pins a standing Know."]
      ["\"…answers / completes an existing…\"" "Link this Know or Done to an open item after the fact."]
      ["Record done (on a To Do)" "One step: creates the Done, optional note as its body, closes the To Do."]
      ["Awaiting synthesis / Record Know" "On a pending Done (open its actions), a Know form pre-filled with a canned conclusion; accept it as-is or say what you actually learned."]
@@ -863,6 +900,9 @@
        [:pre (view)]]
       (changes-panel graph alias-of)
       (filter-chips env)
+      [:datalist {:id "layer-names"}
+       (for [lname (layer-names graph)]
+         [:option {:value lname}])]
       (if (seq nodes)
         [:div.node-list
          (map-indexed
@@ -1015,12 +1055,23 @@
   (subscribed/mark-dirty! subscriptions)
   {:status 204})
 
+(defn- parse-layer
+  "UI layer input: blank means the default layer; anything else must be a
+  bare lowercase word so it reads back unambiguously as an alias qualifier
+  (design/K1). Thrown errors surface through commit!'s notice path."
+  [text]
+  (when-let [text (present (some-> text str/trim))]
+    (when-not (re-matches #"[a-z][a-z0-9-]*" text)
+      (throw (ex-info "Layer names are single lowercase words such as design or north-star."
+                      {:layer text})))
+    (keyword text)))
+
 (defn- node-value [kind body]
   {:id (str (random-uuid)) :kind kind :body body
    :created-at (java.util.Date.) :author ui-author})
 
 (defn- add-root! [request]
-  (let [{:keys [rootBody rootResolvesId rootPinnedUnder rootArtifact]}
+  (let [{:keys [rootBody rootResolvesId rootPinnedUnder rootArtifact rootLayer]}
         (fused/signals request)
         kind (parse-kind (get-in request [:query-params "kind"]))
         resolves-id (present rootResolvesId)
@@ -1030,7 +1081,11 @@
                 pinned-under (assoc :pinned-under pinned-under)
                 (present rootArtifact) (assoc :artifacts [{:kind :reference
                                                           :ref rootArtifact}]))]
-    (commit! #(progress/add-node % value) "Node committed.")))
+    ;; parse inside the commit thunk so a bad layer name lands in the notice
+    (commit! #(progress/add-node % (cond-> value
+                                     (present rootLayer)
+                                     (assoc :layer (parse-layer rootLayer))))
+             "Node committed.")))
 
 (defn- spawn-node! [request]
   (let [parent-id (get-in request [:query-params "parent"])
@@ -1041,12 +1096,15 @@
         resolves-id (present (get signals (keyword (signal-name "resolves" parent-id))))
         artifact (present (get signals (keyword (signal-name "artifact" parent-id))))
         standing? (true? (get signals (keyword (signal-name "standing" parent-id))))
+        layer (present (get signals (keyword (signal-name "layer" parent-id))))
         parents (cond-> #{parent-id} also-from (conj also-from))
         value (cond-> (node-value kind body)
                 resolves-id (assoc :resolves #{resolves-id})
                 artifact (assoc :artifacts [{:kind :reference :ref artifact}])
                 (and standing? (= :know kind)) (assoc :pinned-under parent-id))]
-    (commit! #(progress/spawn % parents value) "Node spawned.")))
+    (commit! #(progress/spawn % parents (cond-> value
+                                          layer (assoc :layer (parse-layer layer))))
+             "Node spawned.")))
 
 (defn- complete! [request]
   (let [node-id (get-in request [:query-params "node"])
