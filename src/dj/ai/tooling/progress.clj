@@ -229,6 +229,30 @@
                  (conj seen ancestor-id) (conj result ancestor))))
       result)))
 
+(defn link
+  "Adds after-the-fact spawn-provenance edges from existing parents to an
+  existing child, for lineage that was not named at capture time. Provenance
+  only: no statuses change. Rejects self-links, edges already present, and
+  edges that would create a spawn cycle."
+  [graph child-id parent-ids]
+  (let [child (require-node graph child-id :link-child)
+        parents (set parent-ids)]
+    (doseq [parent-id parents]
+      (require-node graph parent-id :spawn-parent)
+      (when (= parent-id child-id)
+        (fail "A node cannot spawn itself." {:node-id child-id}))
+      (when (contains? (:spawned-by child) parent-id)
+        (fail "Spawn edge already exists."
+              {:child-id child-id :parent-id parent-id}))
+      (when (some #(= child-id (:id %)) (ancestors graph parent-id))
+        (fail "Spawn edge would create a cycle."
+              {:child-id child-id :parent-id parent-id})))
+    (reduce (fn [g parent-id]
+              (-> g
+                  (update-in [:nodes child-id :spawned-by] conj parent-id)
+                  (update-in [:spawn-children parent-id] (fnil conj []) child-id)))
+            graph parents)))
+
 (defn- scope-node-ids [graph scope-id]
   (when scope-id
     (require-node graph scope-id :scope)

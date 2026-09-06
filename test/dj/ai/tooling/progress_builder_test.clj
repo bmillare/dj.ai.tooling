@@ -155,6 +155,17 @@
     (is (= #{(:id root)} (:spawned-by question)))
     (is (str/includes? (builder/view) "[K2] KNOW: Live root"))))
 
+(deftest link-accepts-aliases-and-records-an-authored-event
+  (let [_root (builder/record! {:kind :know :body "Root"})
+        done (builder/record! {:kind :done :body "Session ran."
+                               :spawned-by #{"K1"}})
+        finding (builder/record! {:kind :know :body "Finding"
+                                  :spawned-by #{"K1"}})
+        linked (builder/link! (:alias finding) [(:alias done)])]
+    (is (= (:id finding) (:id linked)))
+    (is (contains? (set (:spawned-by linked)) (:id done)))
+    (is (str/includes? (builder/changes-since-view 3) "link K2, D1"))))
+
 (deftest ui-cards-and-selectors-carry-canonical-aliases
   (let [root (builder/record! {:kind :know :body "Aliased root"})
         question (builder/record! {:kind :to-know :body "Aliased question"

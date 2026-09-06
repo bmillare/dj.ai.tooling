@@ -225,6 +225,23 @@
     (subscribed/mark-dirty! subscriptions)
     (some #(when (= resolver-id (:id %)) %) (:nodes (topology)))))
 
+(defn link!
+  "Adds after-the-fact spawn-provenance edges from existing parents to an
+  existing child, e.g. (link! \"K47\" [\"D8\"]). Provenance only: no statuses
+  change. Intended for direct use through the embedded nREPL alongside
+  `record!`; requires `identify!` first."
+  [child-id parent-ids]
+  (let [graph (:graph @state)
+        child-id (progress/resolve-id graph child-id)
+        parent-ids (mapv (partial progress/resolve-id graph) parent-ids)
+        author (repl-author!)]
+    (transact! #(-> %
+                    (update :graph progress/link child-id parent-ids)
+                    (author-event author :link
+                                  {:node-ids (into [child-id] parent-ids)})))
+    (subscribed/mark-dirty! subscriptions)
+    (some #(when (= child-id (:id %)) %) (:nodes (topology)))))
+
 (defn attribute!
   "Backfills known provenance onto an existing node, e.g.
   (attribute! id {:actor :brent}). The attribution itself is a write, so

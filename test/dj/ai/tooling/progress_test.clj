@@ -159,6 +159,26 @@
            (mapv :id (progress/resolved-by graph :left))))
     (is (= [:answer-a :answer-b] (get-in graph [:resolved-by :left])))))
 
+(deftest link-adds-after-the-fact-spawn-provenance
+  (let [graph (-> (progress/empty-graph)
+                  (add :root :know "Root" [] 0)
+                  (add :done :done "Session ran." [:root] 1)
+                  (add :finding :know "Finding captured elsewhere." [:root] 2)
+                  (progress/link :finding [:done]))]
+    (is (= #{:root :done} (:spawned-by (progress/node graph :finding))))
+    (is (= [:finding] (mapv :id (progress/children graph :done))))
+    (is (= #{:root :done} (set (map :id (progress/ancestors graph :finding)))))
+    (is (= :open (:status (progress/node graph :finding)))
+        "linking is provenance only; statuses stay untouched")
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"already exists"
+                          (progress/link graph :finding [:done])))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"cannot spawn itself"
+                          (progress/link graph :finding [:finding])))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"cycle"
+                          (progress/link graph :root [:finding])))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"does not exist"
+                          (progress/link graph :finding [:missing])))))
+
 (deftest node-creation-populates-reverse-resolution-index
   (let [graph (-> (progress/empty-graph)
                   (add :q :to-know "Question?" [] 0)
