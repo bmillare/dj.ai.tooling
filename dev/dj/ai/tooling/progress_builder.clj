@@ -435,16 +435,11 @@
     (mapv #(assoc (progress/node graph %) :alias (alias-of %))
           (:order graph))))
 
-(defn- option [node]
-  [:option {:value (:id node)}
-   (str (:alias node) " · " (get kind-labels (:kind node)) " · " (:body node))])
-
-(defn- select-field [label bind-name nodes {:keys [allow-empty?]}]
+(defn- reference-field [label bind-name]
   [:label.field
    [:span label]
-   [:select {:data-bind bind-name}
-    (when allow-empty? [:option {:value ""} "None"])
-    (map option nodes)]])
+   [:input {:data-bind bind-name :list "node-references"
+            :placeholder "Alias, e.g. agent-work/Q3"}]])
 
 (def ^:private default-root-layer
   "Spawns inherit their parent's layer, so the root form was the one path
@@ -452,9 +447,8 @@
   default to Brent's working layer (RI 92/93 decision)."
   "brent-work")
 
-(defn- root-form [graph]
-  (let [nodes (ordered-nodes graph)]
-    [:form.editor.root-editor
+(defn- root-form [_graph]
+  [:form.editor.root-editor
      {:data-signals__ifmissing
       (str "{rootBody: '', rootResolvesId: '', rootPinnedUnder: '',"
            " rootArtifact: '', rootLayer: '" default-root-layer "'}")}
@@ -467,8 +461,8 @@
        [:span "Body"]
        [:textarea {:data-bind "rootBody" :rows "2"
                    :placeholder "What changed, is known, remains unknown, or should happen?"}]]
-      (select-field "Resolves (optional)" "rootResolvesId" nodes {:allow-empty? true})
-      (select-field "Pin under (Know only)" "rootPinnedUnder" nodes {:allow-empty? true})
+      (reference-field "Resolves (optional)" "rootResolvesId")
+      (reference-field "Pin under (Know only)" "rootPinnedUnder")
       [:label.field [:span "Artifact reference (optional)"]
        [:input {:data-bind "rootArtifact" :placeholder "file, URL, commit, or run"}]]
       [:label.field [:span "Layer (optional)"]
@@ -484,7 +478,7 @@
                                       default-root-layer "'")}
          (get kind-labels kind)])
       [:button {:type "button" :data-on:click "$creatingRoot = false"}
-       "Cancel"]]]))
+       "Cancel"]]])
 
 (defn- edge-list [label ids]
   (when (seq ids)
@@ -524,6 +518,8 @@
 ;; The graph filter is one client-side signal holding a space-separated SET of
 ;; lens tokens (per dj.web guidance: signals carry only ephemeral view state;
 ;; the server renders every possible lens and tokens merely toggle visibility).
+;; An empty set intentionally displays no topology cards; the frontier inboxes
+;; remain visible and seed focused views. `all` is an explicit lens.
 ;; The four expressions below are the whole client-side vocabulary.
 
 (defn- token-test
@@ -563,7 +559,8 @@
   [{:keys [question-ids action-ids synthesis-ids triage-ids current-work-ids
            resolution-targets contexts]} node]
   (let [node-id (:id node)]
-    (str "$graphFilter == ''"
+    (str "false"
+         (filter-clause "all")
          (when-let [layer (:layer node)]
            (filter-clause (layer-token layer)))
          (when (question-ids node-id) (filter-clause "questions"))
@@ -602,10 +599,13 @@
                                                            (:resolves node)))]
                                 (str " (re " (str/join ", " targets) ")"))
                               ": as expected; nothing new.")
-        nodes (remove #(= node-id (:id %)) (ordered-nodes graph))
-        resolvable (filterv #(and (compatible-target? (:kind node) %)
-                                  (#{:open :blocked} (:status %)))
-                            nodes)]
+        other-nodes? (< 1 (count (:order graph)))
+        resolvable? (some (fn [candidate-id]
+                            (let [candidate (progress/node graph candidate-id)]
+                              (and (not= node-id candidate-id)
+                                   (compatible-target? (:kind node) candidate)
+                                   (#{:open :blocked} (:status candidate)))))
+                          (:order graph))]
     [:div.node-row {:data-section-start (when section-start? "true")
                     :data-chain (when (and previous-id
                                            (contains? (:spawned-by node) previous-id)
@@ -749,11 +749,11 @@
                                         " $" artifact " = ''; $" standing " = false;"
                                         " $" layer " = '" parent-layer "'")}
            (get kind-labels kind)])]
-       (when (seq nodes)
+      (when other-nodes?
          [:details.join
           [:summary "More links…"]
-          (select-field "Also from" also-from nodes {:allow-empty? true})
-          (select-field "Resolves" resolves nodes {:allow-empty? true})
+          (reference-field "Also from" also-from)
+          (reference-field "Resolves" resolves)
           [:label.field [:span "Artifact reference"]
            [:input {:data-bind artifact :placeholder "file, URL, commit, or run"}]]
           [:label.field [:span "Layer"]
@@ -762,16 +762,15 @@
           [:label.check-field
            [:input {:type "checkbox" :data-bind standing}]
            [:span "Standing Know under this node"]]])]
-      (when (seq resolvable)
+      (when resolvable?
         [:div.resolve-existing
          [:div.composer-label
           (if (= :know (:kind node))
             "This Know answers an existing To Know"
             "This Done completes an existing To Do")]
          [:div.resolve-row
-          [:select {:data-bind resolve-existing}
-           [:option {:value ""} "Choose an open item…"]
-           (map option resolvable)]
+          [:input {:data-bind resolve-existing :list "node-references"
+                   :placeholder "Open item alias"}]
           [:button.primary
            {:type "button"
             :data-on:click (str "@post('/resolve-existing?node=" node-id
@@ -842,7 +841,8 @@
    (when author [:span.byline (str "~" (progress/author-label author))])])
 
 (def ^:private base-filter-chips
-  [{:token "questions" :label "questions"}
+  [{:token "all" :label "all nodes"}
+   {:token "questions" :label "questions"}
    {:token "actions" :label "actions"}
    {:token "synthesis" :label "synthesis"}
    {:token "triage" :label "triage"}
@@ -904,6 +904,11 @@
     [:div.filter-bar
      (focus-entry env)
      [:button.chip {:type "button"
+                    :title "Display every graph node"
+                    :data-show (str "!" (token-test "all"))
+                    :data-on:click (set-filter-action "all")}
+      "show all"]
+     [:button.chip {:type "button"
                     :title "Show only the live frontier and its explanatory ancestry"
                     :data-show (str "!" (token-test "current-work"))
                     :data-on:click (set-filter-action "current-work")}
@@ -927,7 +932,7 @@
      [:button.show-all {:type "button"
                         :data-show "$graphFilter != ''"
                         :data-on:click "$graphFilter = ''"}
-      "Show all"]]))
+      "Hide nodes"]]))
 
 (defn- changes-panel
   "Browser lens over changes-since. The bookmark cursor is what a reconnecting
@@ -976,7 +981,8 @@
      ["\"standing under …\" line" "Add the standing Know's anchor context."]
      ["Focus alias box (top filter bar)" "Type any alias (K7, Q3, …) and press Enter — or pick from the suggestions — to add that node's context without hunting for it."]
      ["\"layer: name\" button" "Add every node in that named layer to the view; while the lens is active, that layer's alias chips drop their layer/ prefix and the frontier inboxes list only that layer's items (headline counts stay graph-wide)."]
-     ["Lens chips (Showing …)" "Each active lens is a chip; × drops just that lens, Show all resets."])
+     ["Show all" "Display the complete topology. The default empty lens displays no cards; inboxes remain available as entry points."]
+     ["Lens chips (Showing …)" "Each active lens is a chip; × drops just that lens. Hide nodes returns to the empty topology."])
     (help-group
      "Author"
      ["New node" "Create a root; the kind button (Done / Know / To Know / To Do) commits it. The layer field defaults to brent-work — change or clear it to land the root elsewhere."]
@@ -1049,6 +1055,10 @@
       [:datalist {:id "layer-names"}
        (for [lname (layer-names graph)]
          [:option {:value lname}])]
+      [:datalist {:id "node-references"}
+       (for [node nodes]
+         [:option {:value (:alias node)}
+          (str (get kind-labels (:kind node)) " · " (:body node))])]
       (if (seq nodes)
         [:div.node-list
          (map-indexed
@@ -1232,17 +1242,22 @@
   (let [{:keys [rootBody rootResolvesId rootPinnedUnder rootArtifact rootLayer]}
         (fused/signals request)
         kind (parse-kind (get-in request [:query-params "kind"]))
-        resolves-id (present rootResolvesId)
-        pinned-under (present rootPinnedUnder)
+        resolves-ref (present rootResolvesId)
+        pinned-under-ref (present rootPinnedUnder)
         value (cond-> (node-value kind rootBody)
-                resolves-id (assoc :resolves #{resolves-id})
-                pinned-under (assoc :pinned-under pinned-under)
                 (present rootArtifact) (assoc :artifacts [{:kind :reference
                                                           :ref rootArtifact}]))]
     ;; parse inside the commit thunk so a bad layer name lands in the notice
-    (commit! #(progress/add-node % (cond-> value
-                                     (present rootLayer)
-                                     (assoc :layer (parse-layer rootLayer))))
+    (commit! (fn [graph]
+               (progress/add-node
+                graph
+                (cond-> value
+                  resolves-ref
+                  (assoc :resolves #{(progress/resolve-id graph resolves-ref)})
+                  pinned-under-ref
+                  (assoc :pinned-under (progress/resolve-id graph pinned-under-ref))
+                  (present rootLayer)
+                  (assoc :layer (parse-layer rootLayer)))))
              "Node committed.")))
 
 (defn- spawn-node! [request]
@@ -1250,18 +1265,23 @@
         kind (parse-kind (get-in request [:query-params "kind"]))
         signals (fused/signals request)
         body (get signals (keyword (signal-name "draft" parent-id)))
-        also-from (present (get signals (keyword (signal-name "alsoFrom" parent-id))))
-        resolves-id (present (get signals (keyword (signal-name "resolves" parent-id))))
+        also-from-ref (present (get signals (keyword (signal-name "alsoFrom" parent-id))))
+        resolves-ref (present (get signals (keyword (signal-name "resolves" parent-id))))
         artifact (present (get signals (keyword (signal-name "artifact" parent-id))))
         standing? (true? (get signals (keyword (signal-name "standing" parent-id))))
         layer (present (get signals (keyword (signal-name "layer" parent-id))))
-        parents (cond-> #{parent-id} also-from (conj also-from))
         value (cond-> (node-value kind body)
-                resolves-id (assoc :resolves #{resolves-id})
                 artifact (assoc :artifacts [{:kind :reference :ref artifact}])
                 (and standing? (= :know kind)) (assoc :pinned-under parent-id))]
-    (commit! #(progress/spawn % parents (cond-> value
-                                          layer (assoc :layer (parse-layer layer))))
+    (commit! (fn [graph]
+               (let [parents (cond-> #{parent-id}
+                               also-from-ref
+                               (conj (progress/resolve-id graph also-from-ref)))
+                     value (cond-> value
+                             resolves-ref
+                             (assoc :resolves #{(progress/resolve-id graph resolves-ref)})
+                             layer (assoc :layer (parse-layer layer)))]
+                 (progress/spawn graph parents value)))
              "Node spawned.")))
 
 (defn- complete! [request]
@@ -1292,7 +1312,8 @@
         target (present (get (fused/signals request)
                              (keyword (signal-name "resolveExisting" node-id))))]
     (if target
-      (commit! #(progress/resolve % node-id [target]) "Resolution linked.")
+      (commit! #(progress/resolve % node-id [(progress/resolve-id % target)])
+               "Resolution linked.")
       (do (transact! #(assoc % :notice {:level :error
                                         :message "Choose the item this node resolves."}))
           (subscribed/mark-dirty! subscriptions)

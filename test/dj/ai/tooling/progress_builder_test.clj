@@ -60,6 +60,11 @@
     (is (str/includes? body "New node"))
     (is (str/includes? body "LLM view"))
     (is (str/includes? body "Raw LLM rendered view"))
+    ;; An empty lens is the intentional landing state: inboxes remain visible,
+    ;; but topology cards require an explicit focus or show-all action.
+    (is (str/includes? body "data-show=\"false ||"))
+    (is (str/includes? body "$graphFilter = &apos;all&apos;"))
+    (is (str/includes? body "Hide nodes"))
     (is (not (str/includes? body "readMode")))
     (is (str/includes? body "Content remains prominent"))))
 
@@ -193,10 +198,42 @@
       (is (str/includes? body "type=\"button\">K1</button>"))
       (is (str/includes? body "type=\"button\">Q1</button>"))
       (is (str/includes? body "type=\"button\">K2</button>"))
-      ;; selector options and lineage lines lead with the same handle
-      (is (str/includes? body "K1 · Know · Aliased root"))
+      ;; One shared reference datalist uses the same handles as the cards.
+      (is (= 1 (count (re-seq #"<datalist id=\"node-references\"" body))))
+      (is (str/includes? body "<option value=\"K1\">Know · Aliased root"))
       (is (str/includes? body "answered by</span>K2 · Aliased answer"))
       (is (str/includes? body (str "K2 · " (builder/resolve-id "K2")))))))
+
+(deftest page-render-size-grows-linearly-with-node-count
+  ;; Regression benchmark for the former quadratic page: every node card used
+  ;; to embed two complete graph-wide option lists. Use marginal byte growth so
+  ;; the fixed page shell does not conceal the asymptotic behavior.
+  (letfn [(graph-with [n]
+            (reduce (fn [graph i]
+                      (progress/add-node
+                       graph {:id (str "node-" i) :kind :know
+                              :body (str "benchmark-body-" i "-"
+                                         (apply str (repeat 160 "x")))
+                              :created-at #inst "2026-09-06"
+                              :author {:actor :agent :session "benchmark"}}))
+                    (progress/empty-graph)
+                    (range n)))
+          (page-bytes [n]
+            @(recorder/patch! builder/state
+                              (recorder.patch/->Replace
+                               (assoc builder/initial-state :graph (graph-with n))))
+            (count (.getBytes ^String (:body (builder/app {:request-method :get
+                                                           :uri "/"}))
+                              "UTF-8")))]
+    (let [size-20 (page-bytes 20)
+          size-40 (page-bytes 40)
+          size-80 (page-bytes 80)
+          first-delta (- size-40 size-20)
+          second-delta (- size-80 size-40)]
+      (is (< second-delta (* 2.5 first-delta))
+          (str "marginal rendered bytes should remain linear: "
+               {:n20 size-20 :n40 size-40 :n80 size-80
+                :first-delta first-delta :second-delta second-delta})))))
 
 (deftest current-work-is-a-browser-lens
   (let [root (builder/record! {:kind :know :body "Live root"})
@@ -351,7 +388,7 @@
         request (post-request
                  "/spawn" {"parent" question-id "kind" "know"}
                  (str "{\"" draft-key "\":\"The answer.\",\""
-                      also-key "\":\"" context-id "\"}"))]
+                      also-key "\":\"K1\"}"))]
     (is (= 204 (:status (builder/app request))))
     (let [graph (:graph @builder/state)
           answer-id (last (:order graph))
@@ -514,7 +551,7 @@
     (is (str/includes? page "/resolve-existing?node="))
     (is (= 204 (:status (builder/app
                          (post-request "/resolve-existing" {"node" k-id}
-                                       (str "{\"" signal "\":\"" q-id "\"}"))))))
+                                       (str "{\"" signal "\":\"Q1\"}"))))))
     (is (= :closed (get-in @builder/state [:graph :nodes q-id :status])))
     (is (contains? (get-in @builder/state [:graph :nodes k-id :resolves]) q-id))
     (is (= :success (get-in @builder/state [:notice :level])))
