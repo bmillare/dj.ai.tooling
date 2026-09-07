@@ -881,9 +881,11 @@
   "One chip per active lens token, each individually removable, so the view
   can be grown and shrunk incrementally instead of only reset. Every possible
   chip is server-rendered and its token merely toggles visibility, keeping the
-  client dumb per dj.web guidance. The focus alias box lives here too, so the
-  lens controls (add a lens, see active lenses, drop them) sit together right
-  above the graph."
+  client dumb per dj.web guidance. The focus alias box and the Current-work
+  entry lens live here too, so every lens control (add a lens, see active
+  lenses, drop them) sits together at the top of the page — above the frontier
+  inboxes, whose height changes as lenses toggle, so the controls never shift
+  underfoot."
   [{:keys [graph alias-of resolution-targets] :as env}]
   (let [chips (concat base-filter-chips
                       (for [lname (layer-names graph)]
@@ -897,6 +899,11 @@
                          :label (str "context: " (alias-of node-id))}))]
     [:div.filter-bar
      (focus-entry env)
+     [:button.chip {:type "button"
+                    :title "Show only the live frontier and its explanatory ancestry"
+                    :data-show (str "!" (token-test "current-work"))
+                    :data-on:click (set-filter-action "current-work")}
+      "current work"]
      ;; one entry button per named layer; it hides while its lens is active
      ;; because the removable chip below then represents the same token
      (for [lname (layer-names graph)]
@@ -963,7 +970,7 @@
      ["\"resolves …\" line" "Add the resolved question's or action's context."]
      ["\"answered by / completed by …\" line" "Add the resolver's context."]
      ["\"standing under …\" line" "Add the standing Know's anchor context."]
-     ["Focus alias box (above the graph)" "Type any alias (K7, Q3, …) and press Enter — or pick from the suggestions — to add that node's context without hunting for it."]
+     ["Focus alias box (top filter bar)" "Type any alias (K7, Q3, …) and press Enter — or pick from the suggestions — to add that node's context without hunting for it."]
      ["\"layer: name\" button" "Add every node in that named layer to the view; while the lens is active, that layer's alias chips drop their layer/ prefix and the frontier inboxes list only that layer's items (headline counts stay graph-wide)."]
      ["Lens chips (Showing …)" "Each active lens is a chip; × drops just that lens, Show all resets."])
     (help-group
@@ -1007,6 +1014,7 @@
       [:p "Manually exercise the graph primitives. State lives only in this process."]]
      (when notice
        [:aside.notice {:data-level (name (:level notice))} (:message notice)])
+     (filter-chips env)
      (frontier-summary graph alias-of frontier)
      [:div {:data-show "$creatingRoot"} (root-form graph)]
      [:section.graph
@@ -1014,10 +1022,6 @@
        [:h2 "Topology"]
        [:div.heading-actions
         [:span (str (count nodes) (if (= 1 (count nodes)) " node" " nodes"))]
-        [:button.mode-switch {:type "button"
-                              :title "Show only the live frontier and its explanatory ancestry"
-                              :data-on:click (set-filter-action "current-work")}
-         "Current work"]
         [:button.mode-switch {:type "button"
                               :data-on:click "$showingModelView = !$showingModelView"}
          "LLM view"]
@@ -1038,7 +1042,6 @@
         [:button {:type "button" :data-on:click "$showingModelView = false"} "Close"]]
        [:pre (view)]]
       (changes-panel graph alias-of)
-      (filter-chips env)
       [:datalist {:id "layer-names"}
        (for [lname (layer-names graph)]
          [:option {:value lname}])]
