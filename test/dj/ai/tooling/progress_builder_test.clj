@@ -520,6 +520,7 @@
     (is (str/includes? page-body "Node text"))
     (is (str/includes? page-body "Save text"))
     (is (str/includes? page-body "Spawn from this node"))
+    (is (str/includes? page-body "placeholder=\"Spawn a thought from here…\" rows=\"5\""))
     (is (not (str/includes? page-body "Click to edit this node")))
     (is (str/includes? page-body "Click to show or hide node actions"))
     (is (str/includes? page-body "@post(&apos;/set-editor&apos;)"))

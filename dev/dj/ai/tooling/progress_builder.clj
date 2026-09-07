@@ -730,7 +730,7 @@
           "Record Know"]])
       [:div.local-editor
        [:div.composer-label "Spawn from this node"]
-       [:textarea {:data-bind draft :rows "2" :placeholder "Spawn a thought from here…"}]
+       [:textarea {:data-bind draft :rows "5" :placeholder "Spawn a thought from here…"}]
        [:div.kind-actions
         (for [kind [:done :know :to-know :to-do]]
           [:button {:type "button" :data-kind (name kind)
@@ -1099,7 +1099,7 @@
   .resolved-by-line { position: relative; color: #a6a8ae; font-size: .72rem; padding: 0 0 0 1rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .pin-line, .synthesis-badge { color: #8ab4f8; font-size: .72rem; margin: .4rem 0; padding: 0; } .synthesis-badge { color: #dbb167; }
   .inspector { color: #75787f; font-size: .72rem; margin: .5rem 0; } .inspector summary, .join summary { cursor: pointer; }
-  .local-editor { border-top: 1px solid #2b2d33; padding-top: .75rem; margin-top: .75rem; } .local-editor textarea { background: #f7f8fa; min-height: 6rem; }
+  .local-editor { border-top: 1px solid #2b2d33; padding-top: .75rem; margin-top: .75rem; } .local-editor textarea { background: #f7f8fa; min-height: 8rem; }
   .body-editor { display: grid; grid-template-columns: 1fr auto; align-items: end; gap: .45rem; margin-top: .65rem; }
   .synthesize-editor { display: grid; grid-template-columns: 1fr auto; align-items: end; gap: .45rem; border-top: 1px solid #2b2d33; padding-top: .75rem; margin-top: .75rem; }
   .synthesize-editor .composer-label { grid-column: 1 / -1; margin-bottom: 0; }
