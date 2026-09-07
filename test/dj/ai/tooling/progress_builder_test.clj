@@ -5,7 +5,8 @@
             [dj.ai.tooling.progress :as progress]
             [dj.ai.tooling.progress-builder :as builder]
             [dj.recorder :as recorder]
-            [dj.recorder.patch :as recorder.patch]))
+            [dj.recorder.patch :as recorder.patch])
+  (:import [java.util.zip GZIPInputStream]))
 
 (defn reset-state [test-fn]
   @(recorder/patch! builder/state
@@ -30,6 +31,19 @@
 
 (defn- signal-id [prefix node-id]
   (str prefix "_" (str/replace node-id #"[^A-Za-z0-9]" "_")))
+
+(deftest root-negotiates-gzip
+  (let [compressed (builder/app {:request-method :get :uri "/"
+                                 :headers {"accept-encoding" "br, gzip"}})
+        decoded (slurp (GZIPInputStream. (io/input-stream (:body compressed))))
+        identity (builder/app {:request-method :get :uri "/"
+                               :headers {"accept-encoding" "identity"}})]
+    (is (= "gzip" (get-in compressed [:headers "Content-Encoding"])))
+    (is (= "Accept-Encoding" (get-in compressed [:headers "Vary"])))
+    (is (str/includes? decoded "Progress graph builder"))
+    (is (nil? (get-in identity [:headers "Content-Encoding"])))
+    (is (string? (:body identity)))
+    (is (= "Accept-Encoding" (get-in identity [:headers "Vary"])))))
 
 (deftest repl-api-reads-and-writes-without-exposing-the-atom
   (let [question (builder/record! {:kind :to-know

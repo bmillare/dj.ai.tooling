@@ -16,7 +16,11 @@
             [dj.web.html :as html]
             [dj.web.http :as http]
             [dj.web.http.response :as response]
-            [nrepl.server :as nrepl]))
+            [dj.web.sse :as sse]
+            [nrepl.server :as nrepl])
+  (:import [java.io ByteArrayOutputStream]
+           [java.nio.charset StandardCharsets]
+           [java.util.zip GZIPOutputStream]))
 
 (def initial-state
   {:graph (progress/empty-graph)
@@ -1158,6 +1162,20 @@
     [:body (mobile-resume/subscription-attrs "/updates")
      (main-view)]]))
 
+(defn- gzip-bytes [^String body]
+  (let [out (ByteArrayOutputStream.)]
+    (with-open [gzip (GZIPOutputStream. out)]
+      (.write gzip (.getBytes body StandardCharsets/UTF_8)))
+    (.toByteArray out)))
+
+(defn- page-response [request]
+  (let [body (page)
+        accepts-gzip? (and (contains? (:headers request) "accept-encoding")
+                           (sse/acceptable-encoding? request "gzip"))]
+    (cond-> (response/html-response (if accepts-gzip? (gzip-bytes body) body))
+      accepts-gzip? (assoc-in [:headers "Content-Encoding"] "gzip")
+      true (assoc-in [:headers "Vary"] "Accept-Encoding"))))
+
 (defn render-main! [writer]
   (fused/write-patch-elements! writer (html/html (main-view))))
 
@@ -1358,7 +1376,7 @@
 
 (defn app [request]
   (case [(:request-method request) (:uri request)]
-    [:get "/"] (response/html-response (page))
+    [:get "/"] (page-response request)
     [:get "/updates"]
     (subscribed/subscription-response request subscriptions #'render-main!)
     [:post "/add-root"] (add-root! request)
