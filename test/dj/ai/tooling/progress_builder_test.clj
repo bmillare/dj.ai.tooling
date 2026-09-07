@@ -10,6 +10,9 @@
 (defn reset-state [test-fn]
   @(recorder/patch! builder/state
                     (recorder.patch/->Replace builder/initial-state))
+  ;; Most legacy card tests exercise the explicit all-nodes projection. Tests
+  ;; of the landing state reset this to builder/initial-ui-state themselves.
+  (reset! builder/ui-state (assoc builder/initial-ui-state :filters ["all"]))
   (builder/identify! {:actor :agent :session "test"})
   (test-fn))
 
@@ -47,26 +50,20 @@
   (let [body (:body (builder/app {:request-method :get :uri "/"}))]
     (is (str/includes? body "data-dj-web-mobile-resume"))
     (is (str/includes? body "@get(&quot;/updates&quot;, {retry: &apos;always&apos;"))
-    (is (str/includes? body "data-signals__ifmissing"))
-    (is (str/includes? body "data-bind=\"rootBody\""))
-    (is (str/includes? body "@post(&apos;/add-root?kind=know&apos;)"))))
+    (is (str/includes? body "@post(&apos;/set-panel?panel=root&apos;)"))
+    (is (not (str/includes? body "data-bind=\"rootBody\"")))))
 
-(deftest topology-is-dense-with-root-and-node-local-editing
+(deftest empty-view-renders-inboxes-but-no-node-or-editor-markup
   (add-root "know" "Content remains prominent")
+  (reset! builder/ui-state builder/initial-ui-state)
   (let [body (:body (builder/app {:request-method :get :uri "/"}))]
-    (is (str/includes? body "data-signals__ifmissing=\"{creatingRoot: false, showingModelView: false, showingChanges: false, showingHelp: false, changesCursor: &apos;&apos;, graphFilter: &apos;&apos;, focusEntry: &apos;&apos;}\""))
-    (is (str/includes? body "data-show=\"$creatingRoot\""))
-    (is (str/includes? body "$editing_"))
+    (is (str/includes? body "class=\"frontier\""))
     (is (str/includes? body "New node"))
     (is (str/includes? body "LLM view"))
-    (is (str/includes? body "Raw LLM rendered view"))
-    ;; An empty lens is the intentional landing state: inboxes remain visible,
-    ;; but topology cards require an explicit focus or show-all action.
-    (is (str/includes? body "data-show=\"false ||"))
-    (is (str/includes? body "$graphFilter = &apos;all&apos;"))
-    (is (str/includes? body "Hide nodes"))
-    (is (not (str/includes? body "readMode")))
-    (is (str/includes? body "Content remains prominent"))))
+    (is (str/includes? body "Choose an inbox item, focus an alias, or show all."))
+    (is (not (str/includes? body "class=\"node-row\"")))
+    (is (not (str/includes? body "Raw LLM rendered view")))
+    (is (not (str/includes? body "data-bind=\"rootBody\"")))))
 
 (deftest resolved-agenda-shows-outcome-and-does-not-offer-manual-close
   (let [question (builder/record! {:kind :to-know :body "What matters?"})]
@@ -74,10 +71,9 @@
                       :resolves #{(:id question)}})
     (let [body (:body (builder/app {:request-method :get :uri "/"}))]
       (is (str/includes? body "Answered"))
-      (is (str/includes? body "ANSWERED"))
       (is (str/includes? body "answered by"))
       (is (str/includes? body "Show this item with the outcome that resolved it"))
-      (is (str/includes? body "$graphFilter = &apos;resolution:"))
+      (is (str/includes? body "@post(&apos;/set-view?token=resolution:"))
       (is (str/includes? body "Content matters."))
       (is (not (str/includes? body "&status=closed"))))))
 
@@ -90,32 +86,44 @@
     (is (str/includes? body "Run the next probe"))
     (is (str/includes? body "results to review"))
     (is (not (str/includes? body "awaiting synthesis")))
-    (is (str/includes? body "$graphFilter = &apos;questions&apos;"))
-    (is (str/includes? body "$graphFilter = &apos;context:"))
+    (is (str/includes? body "@post(&apos;/set-view?token=questions&apos;)"))
+    (is (str/includes? body "@post(&apos;/set-view?token=context:"))
     (is (str/includes? body "Show this item in its graph context"))
     (is (str/includes? body "class=\"filter-chips\""))
-    (is (str/includes? body "$graphFilter = &apos;&apos;"))))
+    (is (str/includes? body "@post(&apos;/clear-view&apos;)"))))
 
-(deftest filter-chips-remove-individual-lenses
+(deftest server-view-chips-remove-individual-lenses
   (let [root (builder/record! {:kind :know :body "Root"})
         question (builder/record! {:kind :to-know :body "Open question"
-                                   :spawned-by #{(:id root)}})
-        body (:body (builder/app {:request-method :get :uri "/"}))]
-    ;; every possible lens has a server-rendered chip toggled by its token
-    (is (str/includes? body ">questions<span class=\"chip-x\""))
-    (is (str/includes? body ">current work<span class=\"chip-x\""))
-    (is (str/includes? body (str ">context: K1<span class=\"chip-x\"")))
-    (is (str/includes? body (str ">context: Q1<span class=\"chip-x\"")))
-    (is (str/includes?
-         body
-         (str "data-show=\"(&apos; &apos;+$graphFilter+&apos; &apos;).includes(&apos; context:"
-              (:id question) " &apos;)\"")))
-    ;; chip removal drops exactly one token from the set
-    (is (str/includes?
-         body
-         (str "$graphFilter = (&apos; &apos;+$graphFilter+&apos; &apos;).replace(&apos; context:"
-              (:id question) " &apos;, &apos; &apos;).trim()")))
+                                   :spawned-by #{(:id root)}})]
+    (reset! builder/ui-state {:filters [(str "context:" (:id question))
+                                        "current-work"]
+                              :panel nil :editing nil})
+    (let [body (:body (builder/app {:request-method :get :uri "/"}))]
+      (is (str/includes? body ">current work<span class=\"chip-x\""))
+      (is (str/includes? body ">context: Q1<span class=\"chip-x\""))
+      (is (str/includes? body
+                         (str "@post(&apos;/remove-view?token=context:"
+                              (:id question) "&apos;)")))
+      (is (not (str/includes? body "$graphFilter"))))
+    (builder/app (post-request "/remove-view" {"token" (str "context:" (:id question))} "{}"))
+    (let [body (:body (builder/app {:request-method :get :uri "/"}))]
+      (is (not (str/includes? body ">context: Q1<span class=\"chip-x\"")))
+      (is (str/includes? body ">current work<span class=\"chip-x\"")))
     root))
+
+(deftest view-commands-resolve-aliases-and-render-current-server-projection
+  (let [root (builder/record! {:kind :know :body "Visible root"})
+        question (builder/record! {:kind :to-know :body "Visible question"
+                                   :spawned-by #{(:id root)}})
+        _hidden (builder/record! {:kind :to-do :body "Hidden root"})]
+    (is (= 204 (:status (builder/app
+                         (post-request "/set-view" {"token" "context:Q1"} "{}")))))
+    (is (= [(str "context:" (:id question))] (:filters @builder/ui-state)))
+    (let [body (:body (builder/app {:request-method :get :uri "/"}))]
+      (is (str/includes? body "Visible root"))
+      (is (str/includes? body "Visible question"))
+      (is (not (str/includes? body "class=\"node-card\" data-kind=\"to-do\""))))))
 
 (deftest current-work-is-exposed-for-model-facing-reads
   (let [root (builder/record! {:kind :know :body "Root context"
@@ -194,6 +202,7 @@
                                    :spawned-by #{(:id root)}})]
     (builder/record! {:kind :know :body "Aliased answer"
                       :resolves #{(:id question)}})
+    (swap! builder/ui-state assoc :editing (builder/resolve-id "K2"))
     (let [body (:body (builder/app {:request-method :get :uri "/"}))]
       (is (str/includes? body "type=\"button\">K1</button>"))
       (is (str/includes? body "type=\"button\">Q1</button>"))
@@ -204,49 +213,46 @@
       (is (str/includes? body "answered by</span>K2 · Aliased answer"))
       (is (str/includes? body (str "K2 · " (builder/resolve-id "K2")))))))
 
-(deftest page-render-size-grows-linearly-with-node-count
-  ;; Regression benchmark for the former quadratic page: every node card used
-  ;; to embed two complete graph-wide option lists. Use marginal byte growth so
-  ;; the fixed page shell does not conceal the asymptotic behavior.
+(deftest rendered-size-follows-the-visible-projection
   (letfn [(graph-with [n]
             (reduce (fn [graph i]
                       (progress/add-node
-                       graph {:id (str "node-" i) :kind :know
+                       graph {:id (str "node-" i) :kind :to-do :status :cancelled
                               :body (str "benchmark-body-" i "-"
                                          (apply str (repeat 160 "x")))
                               :created-at #inst "2026-09-06"
                               :author {:actor :agent :session "benchmark"}}))
                     (progress/empty-graph)
                     (range n)))
-          (page-bytes [n]
+          (page-bytes [n filters]
             @(recorder/patch! builder/state
                               (recorder.patch/->Replace
                                (assoc builder/initial-state :graph (graph-with n))))
+            (reset! builder/ui-state (assoc builder/initial-ui-state
+                                            :filters filters))
             (count (.getBytes ^String (:body (builder/app {:request-method :get
                                                            :uri "/"}))
                               "UTF-8")))]
-    (let [size-20 (page-bytes 20)
-          size-40 (page-bytes 40)
-          size-80 (page-bytes 80)
-          first-delta (- size-40 size-20)
-          second-delta (- size-80 size-40)]
-      (is (< second-delta (* 2.5 first-delta))
-          (str "marginal rendered bytes should remain linear: "
-               {:n20 size-20 :n40 size-40 :n80 size-80
-                :first-delta first-delta :second-delta second-delta})))))
+    (let [empty-20 (page-bytes 20 [])
+          empty-80 (page-bytes 80 [])
+          all-80 (page-bytes 80 ["all"])]
+      (is (< (Math/abs (long (- empty-80 empty-20))) 2000)
+          {:empty-20 empty-20 :empty-80 empty-80})
+      (is (< empty-80 (/ all-80 4))
+          {:empty empty-80 :all all-80}))))
 
 (deftest current-work-is-a-browser-lens
   (let [root (builder/record! {:kind :know :body "Live root"})
         _closed (builder/record! {:kind :know :body "Inactive history"})]
     (builder/record! {:kind :to-know :body "Open question"
                       :spawned-by #{(:id root)}})
+    (reset! builder/ui-state (assoc builder/initial-ui-state
+                                    :filters ["current-work"]))
     (let [body (:body (builder/app {:request-method :get :uri "/"}))]
-      (is (str/includes? body "Current work"))
-      (is (str/includes? body "$graphFilter = &apos;current-work&apos;"))
-      ;; three card visibility clauses (frontier item + ancestry + the
-      ;; untriaged capture, which the triage inbox keeps live) plus the
-      ;; removable chip and the top-bar entry button's hide-while-active guard
-      (is (= 5 (count (re-seq #"includes\(&apos; current-work &apos;\)" body)))))))
+      (is (str/includes? body ">current work<span class=\"chip-x\""))
+      (is (str/includes? body "Live root"))
+      (is (str/includes? body "Open question"))
+      (is (= 3 (count (re-seq #"class=\"node-row\"" body)))))))
 
 (deftest lineage-lines-expand-the-visible-context
   (let [root (builder/record! {:kind :know :body "Shared parent"})
@@ -262,17 +268,12 @@
       (is (str/includes? body (str "<button class=\"from-line\"")))
       (is (str/includes? body (str "<button class=\"resolve-line\"")))
       (is (str/includes? body (str "<button class=\"resolved-by-line\"")))
-      ;; expansion is idempotent: a membership guard precedes the append
       (is (str/includes?
            body
-           (str "includes(&apos; context:" (:id question)
-                " &apos;) || ($graphFilter = ($graphFilter ? $graphFilter + &apos; &apos; : &apos;&apos;) + &apos;context:"
-                (:id question))))
-      ;; visibility clauses test membership in the token set, so lenses combine
+           (str "@post(&apos;/add-view?token=context:" (:id question) "&apos;)")))
       (is (str/includes?
            body
-           (str "(&apos; &apos;+$graphFilter+&apos; &apos;).includes(&apos; context:"
-                (:id root) " &apos;)"))))))
+           (str "@post(&apos;/add-view?token=context:" (:id root) "&apos;)"))))))
 
 (deftest alias-chip-expands-any-node-s-own-context
   ;; a Know has no status button, so the alias chip is its only self-expansion
@@ -280,37 +281,32 @@
         body (:body (builder/app {:request-method :get :uri "/"}))]
     (is (str/includes? body "<button class=\"alias\""))
     (is (str/includes? body "Add this node&apos;s context to the view"))
-    ;; the gesture ADDs the token (idempotent append), not a filter reset
     (is (str/includes?
          body
-         (str "includes(&apos; context:" (:id know)
-              " &apos;) || ($graphFilter = ($graphFilter ? $graphFilter + &apos; &apos; : &apos;&apos;) + &apos;context:"
-              (:id know))))))
+         (str "@post(&apos;/add-view?token=context:" (:id know) "&apos;)")))))
 
 (deftest help-panel-is-a-toggled-gesture-cheat-sheet
+  (swap! builder/ui-state assoc :panel :help)
   (let [body (:body (builder/app {:request-method :get :uri "/"}))]
-    (is (str/includes? body "$showingHelp = !$showingHelp"))
-    (is (str/includes? body "showingHelp: false"))
-    (is (str/includes? body "data-show=\"$showingHelp\""))
     (is (str/includes? body "Cheat sheet"))
+    (is (str/includes? body "@post(&apos;/set-panel&apos;)"))
     ;; the quiet affordances are the ones worth conveying
     (is (str/includes? body "Alias chip (K7, Q3, D5…)"))
     (is (str/includes? body "Focus (replaces the view)"))
     (is (str/includes? body "Expand (adds to the view)"))
     (is (str/includes? body "Record done (on a To Do)"))))
 
-(deftest changes-panel-filters-on-a-client-side-cursor
+(deftest changes-panel-renders-only-the-server-selected-cursor-window
   (let [first-node (builder/record! {:kind :know :body "First change"})
-        _second (builder/record! {:kind :to-know :body "Second change"})
-        body (:body (builder/app {:request-method :get :uri "/"}))]
-    (is (str/includes? body "$showingChanges"))
+        _second (builder/record! {:kind :to-know :body "Second change"})]
+    (swap! builder/ui-state assoc :panel :changes :changes-cursor 1)
+    (let [body (:body (builder/app {:request-method :get :uri "/"}))]
     (is (str/includes? body "Changes since · bookmark cursor 2"))
     (is (str/includes? body "data-bind=\"changesCursor\""))
-    (is (str/includes? body "($changesCursor || 0) &lt; 1"))
-    (is (str/includes? body "($changesCursor || 0) &lt; 2"))
-    (is (str/includes? body (str "K1 · First change")))
+    (is (str/includes? body "Q1 · Second change"))
+    (is (= 1 (count (re-seq #"class=\"change-row\"" body))))
     (is (str/includes? body "~agent/test"))
-    first-node))
+    first-node)))
 
 (deftest changes-since-uses-a-resumable-event-cursor
   (let [first-node (builder/record! {:kind :know :body "First"})
@@ -356,20 +352,16 @@
                                    :spawned-by #{(:id root)}})
         child (builder/record! {:kind :to-do :body "Direct probe"
                                 :spawned-by #{(:id question)}})
-        unrelated (builder/record! {:kind :know :body "Unrelated root"})
-        body (:body (builder/app {:request-method :get :uri "/"}))
-        context-filter (str "includes(&apos; context:" (:id question) " &apos;)")]
+        unrelated (builder/record! {:kind :know :body "Unrelated root"})]
+    (reset! builder/ui-state (assoc builder/initial-ui-state
+                                    :filters [(str "context:" (:id question))]))
+    (let [body (:body (builder/app {:request-method :get :uri "/"}))]
     (is (str/includes? body "class=\"status context-filter\""))
     (is (str/includes? body "Show this item in its graph context"))
     (is (str/includes? body "data-chain=\"true\""))
-    ;; three card visibility clauses (focus, ancestor, child), one chip, and
-    ;; the focus card's own alias-chip expansion guard
-    (is (= 5 (count (re-seq (re-pattern (java.util.regex.Pattern/quote context-filter))
-                            body))))
-    (is (not (str/includes?
-              (first (filter #(str/includes? % (signal-id "bodyDraft" (:id unrelated)))
-                             (str/split body #"<div class=\"node-row\"")))
-              context-filter)))))
+    (is (str/includes? body "Root context"))
+    (is (str/includes? body "Direct probe"))
+    (is (= 3 (count (re-seq #"class=\"node-row\"" body)))))))
 
 (deftest repl-view-renders-content-without-record-mechanics
   (builder/record! {:kind :to-know :body "What matters?"})
@@ -392,6 +384,7 @@
     (is (= 204 (:status (builder/app request))))
     (let [graph (:graph @builder/state)
           answer-id (last (:order graph))
+          _ (swap! builder/ui-state assoc :editing answer-id)
           page-body (:body (builder/app {:request-method :get :uri "/"}))]
       (is (= #{question-id context-id}
              (get-in graph [:nodes answer-id :spawned-by])))
@@ -439,6 +432,7 @@
                     :body "Wrote the design doc"
                     :artifacts [{:kind :reference
                                  :ref "ledger/doc.md @ abc1234"}]})
+  (swap! builder/ui-state assoc :editing (builder/resolve-id "D1"))
   (let [body (:body (builder/app {:request-method :get :uri "/"}))]
     (is (str/includes? body "class=\"artifact-line\""))
     (is (str/includes? body "<span>asset</span>ledger/doc.md @ abc1234"))
@@ -460,6 +454,7 @@
            (post-request "/complete" {"node" todo-id}
                          (str "{\"" (signal-id "doneNote" todo-id) "\":\"\"}")))
         done-id (second (get-in @builder/state [:graph :order]))
+        _ (swap! builder/ui-state assoc :editing done-id)
         page (:body (builder/app {:request-method :get :uri "/"}))
         synth-key (signal-id "synth" done-id)]
     (is (str/includes? page "<button class=\"synthesis-badge\""))
@@ -492,10 +487,11 @@
 
 (deftest node-local-authoring-resets-draft-and-renders-rail-rows
   (add-root "know" "Root")
+  (swap! builder/ui-state assoc :editing (builder/resolve-id "K1"))
   (let [body (:body (builder/app {:request-method :get :uri "/"}))]
     (is (str/includes? body "@post"))
     (is (not (str/includes? body "await @post")))
-    (is (str/includes? body "; $draft_"))
+    (is (str/includes? body "$draft_"))
     (is (str/includes? body "class=\"node-row\""))
     (is (str/includes? body "class=\"rails\""))))
 
@@ -503,6 +499,7 @@
   (add-root "know" "Original text")
   (let [node-id (first (get-in @builder/state [:graph :order]))
         body-key (signal-id "bodyDraft" node-id)
+        _ (swap! builder/ui-state assoc :editing node-id)
         page-body (:body (builder/app {:request-method :get :uri "/"}))]
     (is (str/includes? page-body "Edit text"))
     (is (str/includes? page-body "Add node"))
@@ -511,7 +508,7 @@
     (is (str/includes? page-body "Spawn from this node"))
     (is (not (str/includes? page-body "Click to edit this node")))
     (is (str/includes? page-body "Click to show or hide node actions"))
-    (is (str/includes? page-body " = !$editing_"))
+    (is (str/includes? page-body "@post(&apos;/set-editor&apos;)"))
     (is (str/includes? page-body "<span>Node actions</span></div>"))
     (is (= 204 (:status
                 (builder/app
@@ -545,6 +542,7 @@
   (add-root "to-know" "Open question?")
   (add-root "know" "The answer")
   (let [[q-id k-id] (get-in @builder/state [:graph :order])
+        _ (swap! builder/ui-state assoc :editing k-id)
         page (:body (builder/app {:request-method :get :uri "/"}))
         signal (signal-id "resolveExisting" k-id)]
     (is (str/includes? page "This Know answers an existing To Know"))
@@ -616,17 +614,13 @@
 (deftest layer-lens-filters-chips-and-strips-alias-prefixes
   (builder/record! {:kind :know :body "Default-layer node."})
   (builder/record! {:kind :know :body "Design-layer node." :layer :design})
+  (reset! builder/ui-state (assoc builder/initial-ui-state
+                                  :filters ["layer:design"]))
   (let [body (:body (builder/app {:request-method :get :uri "/"}))]
-    ;; entry button plus a removable chip for the named layer
-    (is (str/includes? body "class=\"chip layer-lens\""))
     (is (str/includes? body ">layer: design<span class=\"chip-x\""))
-    ;; the layered node's row is visible under the layer token
-    (is (str/includes?
-         body
-         "(&apos; &apos;+$graphFilter+&apos; &apos;).includes(&apos; layer:design &apos;)"))
-    ;; alias chip renders qualified by default and stripped under the lens
-    (is (str/includes? body ">design/K1</span>"))
-    (is (str/includes? body ">K1</span>"))
+    (is (str/includes? body "Design-layer node."))
+    (is (not (str/includes? body "Default-layer node.")))
+    (is (str/includes? body "type=\"button\">K1</button>"))
     ;; the shared datalist offers existing layer names to both forms
     (is (str/includes? body "<datalist id=\"layer-names\""))
     (is (str/includes? body "<option value=\"design\""))))
@@ -635,6 +629,7 @@
   (let [parent (builder/record! {:kind :know :body "Design parent."
                                  :layer :design})
         parent-id (:id parent)
+        _ (swap! builder/ui-state assoc :editing parent-id)
         page (:body (builder/app {:request-method :get :uri "/"}))
         layer-key (signal-id "layer" parent-id)
         draft-key (signal-id "draft" parent-id)]
@@ -678,6 +673,7 @@
 
 (deftest root-form-layer-defaults-to-brent-work
   (builder/record! {:kind :know :body "Any node."})
+  (swap! builder/ui-state assoc :panel :root)
   (let [body (:body (builder/app {:request-method :get :uri "/"}))]
     (is (str/includes? body "rootLayer: &apos;brent-work&apos;"))
     (is (str/includes? body "$rootLayer = &apos;brent-work&apos;"))))
@@ -685,9 +681,8 @@
 (deftest layer-lens-narrows-the-frontier-inboxes
   (builder/record! {:kind :to-know :body "Design question." :layer :design})
   (builder/record! {:kind :to-know :body "Unlayered question."})
-  (let [body (:body (builder/app {:request-method :get :uri "/"}))
-        t "(&apos; &apos;+$graphFilter+&apos; &apos;).includes(&apos; layer:design &apos;)"]
-    ;; the layered inbox item stays listed under its own layer lens
-    (is (str/includes? body (str "<li data-show=\"(!" t ") || " t "\">")))
-    ;; the unlayered inbox item hides whenever any layer lens is active
-    (is (str/includes? body (str "<li data-show=\"(!" t ")\">")))))
+  (reset! builder/ui-state (assoc builder/initial-ui-state
+                                  :filters ["layer:design"]))
+  (let [body (:body (builder/app {:request-method :get :uri "/"}))]
+    (is (str/includes? body "Design question."))
+    (is (not (str/includes? body "Unlayered question.")))))

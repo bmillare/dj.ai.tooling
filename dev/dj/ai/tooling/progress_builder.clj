@@ -33,6 +33,13 @@
 (defonce state (recorder/open state-path {:baseline initial-state}))
 (defonce subscriptions (subscribed/registry))
 
+(def initial-ui-state
+  "Ephemeral shared view state for this deliberately single-human dev UI.
+  Graph/domain state remains in the recorder; view selection does not."
+  {:filters [] :panel nil :editing nil})
+
+(defonce ui-state (atom initial-ui-state))
+
 (defn- transact! [f]
   @(recorder/tx! state (fn [current]
                          (recorder.patch/->Replace (f current)))))
@@ -472,12 +479,12 @@
       (for [kind [:done :know :to-know :to-do]]
         [:button {:type "button" :data-kind (name kind)
                   :data-on:click (str "@post('/add-root?kind=" (name kind)
-                                      "'); $creatingRoot = false; $rootBody = '';"
+                                      "'); $rootBody = '';"
                                       " $rootResolvesId = ''; $rootPinnedUnder = '';"
                                       " $rootArtifact = ''; $rootLayer = '"
                                       default-root-layer "'")}
          (get kind-labels kind)])
-      [:button {:type "button" :data-on:click "$creatingRoot = false"}
+      [:button {:type "button" :data-on:click "@post('/set-panel')"}
        "Cancel"]]])
 
 (defn- edge-list [label ids]
@@ -515,70 +522,50 @@
                           frontier)]
         (recur (into acc parents) parents (dec hops))))))
 
-;; The graph filter is one client-side signal holding a space-separated SET of
-;; lens tokens (per dj.web guidance: signals carry only ephemeral view state;
-;; the server renders every possible lens and tokens merely toggle visibility).
-;; An empty set intentionally displays no topology cards; the frontier inboxes
-;; remain visible and seed focused views. `all` is an explicit lens.
-;; The four expressions below are the whole client-side vocabulary.
-
-(defn- token-test
-  "JS: is this token in the active filter set?"
-  [token]
-  (str "(' '+$graphFilter+' ').includes(' " token " ')"))
-
-(defn- filter-clause [token]
-  (str " || " (token-test token)))
-
-(defn- set-filter-action
-  "Click expression that replaces the filter set: entry-point lenses (frontier
-  groups, status buttons, Current work) seed a fresh view."
-  [token]
-  (str "$graphFilter = '" token "'"))
-
-(defn- add-filter-action
-  "Click expression that adds one token to the set, idempotently: expansion
-  gestures (lineage lines) grow the view instead of replacing it."
-  [token]
-  (str (token-test token)
-       " || ($graphFilter = ($graphFilter ? $graphFilter + ' ' : '') + '"
-       token "')"))
-
-(defn- remove-filter-action
-  "Click expression that drops one token from the set: chip removal."
-  [token]
-  (str "$graphFilter = (' '+$graphFilter+' ').replace(' " token " ', ' ').trim()"))
-
 (defn- layer-token [layer]
   (str "layer:" (name layer)))
 
 (defn- layer-names [graph]
   (sort (map name (progress/layers graph))))
 
-(defn- filter-expression
-  [{:keys [question-ids action-ids synthesis-ids triage-ids current-work-ids
-           resolution-targets contexts]} node]
-  (let [node-id (:id node)]
-    (str "false"
-         (filter-clause "all")
-         (when-let [layer (:layer node)]
-           (filter-clause (layer-token layer)))
-         (when (question-ids node-id) (filter-clause "questions"))
-         (when (action-ids node-id) (filter-clause "actions"))
-         (when (synthesis-ids node-id) (filter-clause "synthesis"))
-         (when (triage-ids node-id) (filter-clause "triage"))
-         (when (current-work-ids node-id) (filter-clause "current-work"))
-         (when (resolution-targets node-id)
-           (filter-clause (str "resolution:" node-id)))
-         (apply str
-                (for [target-id (:resolves node)]
-                  (filter-clause (str "resolution:" target-id))))
-         (apply str
-                (for [[focus-id context-ids] contexts
-                      :when (context-ids node-id)]
-                  (filter-clause (str "context:" focus-id)))))))
+(defn- token-url [route token]
+  (str "@post('/" route "?token=" token "')"))
 
-(defn- node-card [{:keys [graph alias-of] :as env} node section-start? previous-id]
+(defn- frontier-token-ids [frontier token]
+  (some->> ({"questions" :to-knows
+             "actions" :to-dos
+             "synthesis" :unsynthesized-dones
+             "triage" :untriaged-knows}
+            token)
+           (get frontier)
+           (map :id)))
+
+(defn- selected-node-ids [graph filters]
+  (let [frontier (progress/frontier graph)]
+    (into #{}
+          (mapcat
+           (fn [token]
+             (cond
+               (= "all" token) (:order graph)
+               (= "current-work" token)
+               (map :id (:nodes (progress/current-work graph)))
+               (frontier-token-ids frontier token)
+               (frontier-token-ids frontier token)
+               (str/starts-with? token "layer:")
+               (let [layer (keyword (subs token (count "layer:")))]
+                 (filter #(= layer (:layer (progress/node graph %))) (:order graph)))
+               (str/starts-with? token "context:")
+               (context-node-ids graph (subs token (count "context:")))
+               (str/starts-with? token "resolution:")
+               (let [target-id (subs token (count "resolution:"))]
+                 (into #{target-id} (map :id) (progress/resolved-by graph target-id)))
+               :else []))
+           filters))))
+
+(defn- selected-topology [graph filters]
+  (progress/project-topology graph (selected-node-ids graph filters) {}))
+
+(defn- node-card [{:keys [graph alias-of filters editing]} node section-start? previous-id]
   (let [node-id (:id node)
         distant-parents (remove #{previous-id} (:spawned-by node))
         draft (signal-name "draft" node-id)
@@ -590,7 +577,6 @@
         standing (signal-name "standing" node-id)
         done-note (signal-name "doneNote" node-id)
         body-draft (signal-name "bodyDraft" node-id)
-        editing (signal-name "editing" node-id)
         resolve-existing (signal-name "resolveExisting" node-id)
         synth (signal-name "synth" node-id)
         pending-synthesis? (progress/synthesis-pending? graph node-id)
@@ -611,35 +597,33 @@
                                            (contains? (:spawned-by node) previous-id)
                                            (not (#{:branch :last-branch}
                                                  (peek (:gutter node)))))
-                                  "true")
-                    :data-show (filter-expression env node)}
+                                  "true")}
      [:div.rails
       (for [cell (:gutter node)]
         [:span.rail {:data-cell (name cell)}])]
-     [:article.node-card {:data-kind (name (:kind node))
-                          :data-signals__ifmissing
-                          (str "{" draft ": '', " also-from ": '', "
-                               resolves ": '', " artifact ": '', "
-                               layer ": '" parent-layer "', " standing
-                               ": false, " done-note ": '', " body-draft ": "
-                               (pr-str (:body node)) ", " editing ": false, "
-                               resolve-existing ": ''"
-                               (when pending-synthesis?
-                                 (str ", " synth ": " (pr-str canned-synthesis)))
-                               "}")}
+     [:article.node-card
+      (cond-> {:data-kind (name (:kind node))}
+        (= editing node-id)
+        (assoc :data-signals__ifmissing
+               (str "{" draft ": '', " also-from ": '', "
+                    resolves ": '', " artifact ": '', "
+                    layer ": '" parent-layer "', " standing
+                    ": false, " done-note ": '', " body-draft ": "
+                    (pr-str (:body node)) ", "
+                    resolve-existing ": ''"
+                    (when pending-synthesis?
+                      (str ", " synth ": " (pr-str canned-synthesis)))
+                    "}")))
      [:div.node-content
       [:header
        [:div.node-heading
         [:button.alias
          {:type "button" :title "Add this node's context to the view"
-          :data-on:click__stop (add-filter-action (str "context:" node-id))}
+          :data-on:click__stop (token-url "add-view" (str "context:" node-id))}
          (if-let [layer (:layer node)]
-           ;; under the node's own layer lens the qualifier is noise, so the
-           ;; chip drops it; every other rendering stays qualified (K64/K70)
-           (list [:span {:data-show (token-test (layer-token layer))}
-                  (subs (:alias node) (inc (count (name layer))))]
-                 [:span {:data-show (str "!" (token-test (layer-token layer)))}
-                  (:alias node)])
+           (if (some #{(layer-token layer)} filters)
+             (subs (:alias node) (inc (count (name layer))))
+             (:alias node))
            (:alias node))]
         [:span.kind (get kind-labels (:kind node))]
         (when-let [author (:author node)]
@@ -652,41 +636,41 @@
               [:button.status.resolution-filter
                {:type "button" :data-status (name (:status node))
                 :title "Show this item with the outcome that resolved it"
-                :data-on:click__stop (set-filter-action (str "resolution:" node-id))}
+                :data-on:click__stop (token-url "set-view" (str "resolution:" node-id))}
                (lifecycle-label graph node)]
               (if (#{:open :blocked} (:status node))
                 [:button.status.context-filter
                  {:type "button" :data-status (name (:status node))
                   :title "Show this item in its graph context"
-                  :data-on:click__stop (set-filter-action (str "context:" node-id))}
+                  :data-on:click__stop (token-url "set-view" (str "context:" node-id))}
                  (lifecycle-label graph node)]
                 [:span.status {:data-status (name (:status node))}
                  (lifecycle-label graph node)]))))
         [:button.edit-text {:type "button"
-                            :data-on:click__stop (str "$" editing " = true")}
+                            :data-on:click__stop (str "@post('/set-editor?node=" node-id "')")}
          "Edit text"]
         [:button.add-node {:type "button"
-                           :data-on:click__stop (str "$" editing " = true")}
+                           :data-on:click__stop (str "@post('/set-editor?node=" node-id "')")}
          "Add node"]]]
       ;; div, not p: the rendered markdown contains its own block elements.
       ;; The editor textarea binds the raw text via body-draft above, so
       ;; markdown is a display concern only.
       [:div.body {:title "Click to show or hide node actions"
-                  :data-on:click (str "$" editing " = !$" editing)}
+                  :data-on:click (str "@post('/set-editor?node=" node-id "')")}
        (html/raw (:html (md/render (:body node))))]
       (when (seq distant-parents)
         [:div.lineage
          (for [parent-id distant-parents]
            [:button.from-line
             {:type "button" :title "Add this parent's context to the view"
-             :data-on:click__stop (add-filter-action (str "context:" parent-id))}
+             :data-on:click__stop (token-url "add-view" (str "context:" parent-id))}
             [:span "from"] (aliased-body graph alias-of parent-id)])])
       (when (seq (:resolves node))
         [:div.lineage
          (for [target-id (:resolves node)]
            [:button.resolve-line
             {:type "button" :title "Add the resolved item's context to the view"
-             :data-on:click__stop (add-filter-action (str "context:" target-id))}
+             :data-on:click__stop (token-url "add-view" (str "context:" target-id))}
             [:span "resolves"]
             (aliased-body graph alias-of target-id)])])
       (when-let [resolvers (seq (progress/resolved-by graph node-id))]
@@ -694,8 +678,8 @@
          (for [resolver resolvers]
            [:button.resolved-by-line
             {:type "button" :title "Add the resolver's context to the view"
-             :data-on:click__stop (add-filter-action
-                                   (str "context:" (:id resolver)))}
+             :data-on:click__stop (token-url "add-view"
+                                             (str "context:" (:id resolver)))}
             [:span (if (= :to-know (:kind node)) "answered by" "completed by")]
             (aliased-body graph alias-of (:id resolver))])])
       (when-let [artifacts (seq (:artifacts node))]
@@ -707,15 +691,18 @@
       (when-let [pinned-under (:pinned-under node)]
         [:button.pin-line
          {:type "button" :title "Add the standing node's context to the view"
-          :data-on:click__stop (add-filter-action (str "context:" pinned-under))}
+          :data-on:click__stop (token-url "add-view" (str "context:" pinned-under))}
          "standing under " (aliased-body graph alias-of pinned-under)])
       (when pending-synthesis?
         [:button.synthesis-badge
          {:type "button" :title "Open the synthesis form for this result"
-          :data-on:click__stop (str "$" editing " = true")}
+          :data-on:click__stop (str "@post('/set-editor?node=" node-id "')")}
          "Awaiting synthesis"])]
-     [:div.node-controls {:data-show (str "$" editing)}
+     (when (= editing node-id)
+       [:div.node-controls
       [:div.control-heading [:span "Node actions"]]
+      [:button {:type "button" :data-on:click "@post('/set-editor')"}
+       "Close actions"]
       [:form.body-editor
        [:label.field
         [:span "Node text"]
@@ -789,48 +776,46 @@
            [:button {:type "button"
                      :data-on:click (str "@post('/set-status?node=" node-id
                                          "&status=" (name status) "')")}
-            (get status-labels status)])])]]]))
+            (get status-labels status)])])
+       ])
+     ]]))
 
-(defn- inbox-visibility
-  "JS for one frontier-inbox item: an active layer lens narrows the inboxes
-  to that layer; with no layer lens active every item shows. Nil (always
-  visible) when the graph has no named layers."
-  [graph node]
-  (when-let [names (seq (layer-names graph))]
-    (str "("
-         (str/join " && " (map #(str "!" (token-test (str "layer:" %))) names))
-         ")"
-         (when-let [layer (get-in graph [:nodes (:id node) :layer])]
-           (filter-clause (layer-token layer))))))
-
-(defn- frontier-group [graph alias-of filter-value label nodes]
+(defn- frontier-group [alias-of filter-value label nodes]
   [:section.frontier-group
    [:button.frontier-heading
-    {:type "button" :data-on:click (set-filter-action filter-value)}
+    {:type "button" :data-on:click (token-url "set-view" filter-value)}
     [:strong (count nodes)] [:span label]]
    (if (seq nodes)
      [:ol.frontier-items
       (for [node nodes]
-        [:li {:data-show (inbox-visibility graph node)}
+        [:li
          [:button {:type "button"
                    :title "Show this item in its graph context"
-                   :data-on:click (set-filter-action (str "context:" (:id node)))}
+                   :data-on:click (token-url "set-view" (str "context:" (:id node)))}
           (str (alias-of (:id node)) " · " (:body node))]])]
      [:p.frontier-empty "None"])])
 
-(defn- frontier-summary [graph alias-of frontier]
-  (let [{:keys [to-knows to-dos unsynthesized-dones untriaged-knows]} frontier]
+(defn- frontier-summary [graph alias-of frontier filters]
+  (let [active-layers (into #{}
+                            (comp (filter #(str/starts-with? % "layer:"))
+                                  (map #(keyword (subs % (count "layer:")))))
+                            filters)
+        visible (fn [nodes]
+                  (if (seq active-layers)
+                    (filterv #(active-layers (:layer %)) nodes)
+                    nodes))
+        {:keys [to-knows to-dos unsynthesized-dones untriaged-knows]}
+        (update-vals frontier visible)]
     [:section.frontier
-     (frontier-group graph alias-of "questions" "open questions" to-knows)
-     (frontier-group graph alias-of "actions" "open actions" to-dos)
-     (frontier-group graph alias-of "synthesis" "results to review" unsynthesized-dones)
-     (frontier-group graph alias-of "triage" "captures to triage" untriaged-knows)]))
+     (frontier-group alias-of "questions" "open questions" to-knows)
+     (frontier-group alias-of "actions" "open actions" to-dos)
+     (frontier-group alias-of "synthesis" "results to review" unsynthesized-dones)
+     (frontier-group alias-of "triage" "captures to triage" untriaged-knows)]))
 
 (defn- change-row
-  "One authored (or legacy-capture) event; visibility is client-side so the
-  cursor input filters without a server round trip."
+  "One authored (or legacy-capture) event in the server-selected window."
   [graph alias-of {:keys [cursor op node node-ids author]}]
-  [:li.change-row {:data-show (str "($changesCursor || 0) < " cursor)}
+  [:li.change-row
    [:span.change-cursor (str "[" cursor "]")]
    [:span.change-op (name op)]
    [:span.change-refs
@@ -840,112 +825,83 @@
                 (map #(aliased-body graph alias-of %) node-ids)))]
    (when author [:span.byline (str "~" (progress/author-label author))])])
 
-(def ^:private base-filter-chips
-  [{:token "all" :label "all nodes"}
-   {:token "questions" :label "questions"}
-   {:token "actions" :label "actions"}
-   {:token "synthesis" :label "synthesis"}
-   {:token "triage" :label "triage"}
-   {:token "current-work" :label "current work"}])
-
 (defn- focus-entry
-  "Free-typed alias → context lens, so a focus chip can be added without
-  hunting for the node in a list. The alias→token map is server-rendered into
-  the handler expression (the client stays dumb per dj.web guidance); Enter or
-  picking from the datalist adds the chip and clears the box, an unknown alias
-  leaves the text in place as feedback."
-  [{:keys [graph alias-of]}]
-  (let [alias-map (str "({"
-                       (str/join ","
-                                 (for [node-id (:order graph)]
-                                   ;; keyed uppercase so the case-folding lookup
-                                   ;; below also finds layer-qualified aliases
-                                   ;; such as design/K1
-                                   (str "'" (str/upper-case (alias-of node-id))
-                                        "':'context:" node-id "'")))
-                       "})")
-        add-typed (str "((m) => { const t = m[$focusEntry.trim().toUpperCase()];"
-                       " if (t) {"
-                       " if (!(' '+$graphFilter+' ').includes(' '+t+' '))"
-                       " { $graphFilter = ($graphFilter ? $graphFilter + ' ' : '') + t }"
-                       " $focusEntry = '' } })(" alias-map ")")]
-    [:label.focus-entry
-     [:input {:data-bind "focusEntry"
-              :list "focus-aliases"
-              :placeholder "Focus alias…"
-              :title "Type a node alias (K7, Q3, …) and press Enter to add its context to the view"
-              :data-on:keydown (str "evt.key === 'Enter' && (" add-typed ")")
-              :data-on:change add-typed}]
-     [:datalist {:id "focus-aliases"}
-      (for [node-id (:order graph)]
-        [:option {:value (alias-of node-id)}
-         (short-body graph node-id)])]]))
+  "Free-typed alias resolved by the server into an additive context lens."
+  []
+  [:label.focus-entry {:data-signals__ifmissing "{focusEntry: ''}"}
+   [:input {:data-bind "focusEntry"
+            :placeholder "Focus alias…"
+            :title "Type a node alias (K7, Q3, …), then add its context"
+            :data-on:keydown
+            "evt.key === 'Enter' && (@post('/add-focus'); $focusEntry = '')"}]
+   [:button {:type "button"
+             :data-on:click "@post('/add-focus'); $focusEntry = ''"}
+    "Add"]])
+
+(defn- token-label [alias-of token]
+  (cond
+    (= "all" token) "all nodes"
+    (= "current-work" token) "current work"
+    (#{"questions" "actions" "synthesis" "triage"} token) token
+    (str/starts-with? token "layer:") (str "layer: " (subs token (count "layer:")))
+    (str/starts-with? token "context:")
+    (str "context: " (alias-of (subs token (count "context:"))))
+    (str/starts-with? token "resolution:")
+    (str "resolved: " (alias-of (subs token (count "resolution:"))))
+    :else token))
 
 (defn- filter-chips
-  "One chip per active lens token, each individually removable, so the view
-  can be grown and shrunk incrementally instead of only reset. Every possible
-  chip is server-rendered and its token merely toggles visibility, keeping the
-  client dumb per dj.web guidance. The focus alias box and the Current-work
+  "One chip per active server-side lens, each individually removable, so the
+  view can be grown and shrunk incrementally instead of only reset. Only active
+  chips and currently projected nodes are rendered. The focus alias box and the Current-work
   entry lens live here too, so every lens control (add a lens, see active
   lenses, drop them) sits together at the top of the page — above the frontier
   inboxes, whose height changes as lenses toggle, so the controls never shift
   underfoot."
-  [{:keys [graph alias-of resolution-targets] :as env}]
-  (let [chips (concat base-filter-chips
-                      (for [lname (layer-names graph)]
-                        {:token (str "layer:" lname)
-                         :label (str "layer: " lname)})
-                      (for [target-id resolution-targets]
-                        {:token (str "resolution:" target-id)
-                         :label (str "resolved: " (alias-of target-id))})
-                      (for [node-id (:order graph)]
-                        {:token (str "context:" node-id)
-                         :label (str "context: " (alias-of node-id))}))]
+  [{:keys [graph alias-of filters]}]
     [:div.filter-bar
-     (focus-entry env)
-     [:button.chip {:type "button"
-                    :title "Display every graph node"
-                    :data-show (str "!" (token-test "all"))
-                    :data-on:click (set-filter-action "all")}
-      "show all"]
+     (focus-entry)
+     (when-not (= ["all"] filters)
+       [:button.chip {:type "button" :title "Display every graph node"
+                      :data-on:click (token-url "set-view" "all")}
+        "show all"])
      [:button.chip {:type "button"
                     :title "Show only the live frontier and its explanatory ancestry"
-                    :data-show (str "!" (token-test "current-work"))
-                    :data-on:click (set-filter-action "current-work")}
+                    :data-on:click (token-url "set-view" "current-work")}
       "current work"]
-     ;; one entry button per named layer; it hides while its lens is active
-     ;; because the removable chip below then represents the same token
      (for [lname (layer-names graph)]
-       [:button.chip.layer-lens
-        {:type "button" :title "Add this layer's nodes to the view"
-         :data-show (str "!" (token-test (str "layer:" lname)))
-         :data-on:click (add-filter-action (str "layer:" lname))}
-        (str "layer: " lname)])
-     [:div.filter-chips {:data-show "$graphFilter != ''"}
-      [:span.filter-chips-label "Showing"]
-      (for [{:keys [token label]} chips]
-        [:button.chip {:type "button"
-                       :title "Remove this lens from the view"
-                       :data-show (token-test token)
-                       :data-on:click (remove-filter-action token)}
-         label [:span.chip-x "×"]])]
-     [:button.show-all {:type "button"
-                        :data-show "$graphFilter != ''"
-                        :data-on:click "$graphFilter = ''"}
-      "Hide nodes"]]))
+       (let [token (str "layer:" lname)]
+         (when-not (some #{token} filters)
+           [:button.chip.layer-lens
+            {:type "button" :title "Add this layer's nodes to the view"
+             :data-on:click (token-url "add-view" token)}
+            (str "layer: " lname)])))
+     (when (seq filters)
+       [:div.filter-chips
+        [:span.filter-chips-label "Showing"]
+        (for [token filters]
+          [:button.chip {:type "button" :title "Remove this lens from the view"
+                         :data-on:click (token-url "remove-view" token)}
+           (token-label alias-of token) [:span.chip-x "×"]])])
+     (when (seq filters)
+       [:button.show-all {:type "button" :data-on:click "@post('/clear-view')"}
+        "Hide nodes"])])
 
 (defn- changes-panel
-  "Browser lens over changes-since. The bookmark cursor is what a reconnecting
-  agent saves; typing a saved cursor shows only the events after it."
-  [graph alias-of]
-  (let [{:keys [cursor events]} (changes-since 0)]
-    [:section.changes-view {:data-show "$showingChanges"}
+  "Server-projected view over changes-since. The bookmark cursor is what a
+  reconnecting agent saves; typing a saved cursor shows only later events."
+  [graph alias-of since]
+  (let [{:keys [cursor events]} (changes-since since)]
+    [:section.changes-view {:data-signals__ifmissing
+                            (str "{changesCursor: '" since "'}")}
      [:div.control-heading
       [:span (str "Changes since · bookmark cursor " cursor)]
-      [:button {:type "button" :data-on:click "$showingChanges = false"} "Close"]]
+      [:button {:type "button" :data-on:click "@post('/set-panel')"} "Close"]]
      [:label.cursor-field
       [:span "Show events after cursor"]
-      [:input {:data-bind "changesCursor" :placeholder "0"}]]
+      [:input {:data-bind "changesCursor" :placeholder "0"}]
+      [:button {:type "button" :data-on:click "@post('/set-changes-cursor')"}
+       "Apply"]]
      (if (seq events)
        [:ol.change-list (map #(change-row graph alias-of %) events)]
        [:p.frontier-empty "No recorded events."])]))
@@ -960,10 +916,10 @@
   "Cheat sheet for every gesture the UI offers; the affordances are deliberately
   quiet (chips, pills, plain text lines), so this is where they are conveyed."
   []
-  [:section.help-view {:data-show "$showingHelp"}
+  [:section.help-view
    [:div.control-heading
     [:span "Cheat sheet — every clickable gesture"]
-    [:button {:type "button" :data-on:click "$showingHelp = false"} "Close"]]
+    [:button {:type "button" :data-on:click "@post('/set-panel')"} "Close"]]
    [:div.help-columns
     (help-group
      "Focus (replaces the view)"
@@ -979,7 +935,7 @@
      ["\"resolves …\" line" "Add the resolved question's or action's context."]
      ["\"answered by / completed by …\" line" "Add the resolver's context."]
      ["\"standing under …\" line" "Add the standing Know's anchor context."]
-     ["Focus alias box (top filter bar)" "Type any alias (K7, Q3, …) and press Enter — or pick from the suggestions — to add that node's context without hunting for it."]
+     ["Focus alias box (top filter bar)" "Type any alias (K7, Q3, …) and press Enter to add that node's context without hunting for it."]
      ["\"layer: name\" button" "Add every node in that named layer to the view; while the lens is active, that layer's alias chips drop their layer/ prefix and the frontier inboxes list only that layer's items (headline counts stay graph-wide)."]
      ["Show all" "Display the complete topology. The default empty lens displays no cards; inboxes remain available as entry points."]
      ["Lens chips (Showing …)" "Each active lens is a chip; × drops just that lens. Hide nodes returns to the empty topology."])
@@ -1001,23 +957,16 @@
 
 (defn main-view []
   (let [{:keys [graph notice]} @state
-        topology (progress/topology graph)
+        {:keys [filters panel editing changes-cursor]} @ui-state
+        full-topology (progress/topology graph)
+        frontier (:frontier full-topology)
+        topology (selected-topology graph filters)
         nodes (progress/topology-layout topology)
-        frontier (:frontier topology)
-        contexts (into {} (map (fn [node]
-                                 [(:id node) (context-node-ids graph (:id node))]))
-                       nodes)
         roots (set (:roots topology))
         alias-of (:id->alias (progress/aliases graph))
-        env {:graph graph :contexts contexts :alias-of alias-of
-             :question-ids (set (map :id (:to-knows frontier)))
-             :action-ids (set (map :id (:to-dos frontier)))
-             :synthesis-ids (set (map :id (:unsynthesized-dones frontier)))
-             :triage-ids (set (map :id (:untriaged-knows frontier)))
-             :resolution-targets (into #{} (mapcat :resolves) (:nodes topology))
-             :current-work-ids
-             (set (map :id (:nodes (progress/current-work graph))))}]
-    [:main#app {:data-signals__ifmissing "{creatingRoot: false, showingModelView: false, showingChanges: false, showingHelp: false, changesCursor: '', graphFilter: '', focusEntry: ''}"}
+        env {:graph graph :alias-of alias-of :filters filters :editing editing}
+        reference-editor? (or (= :root panel) editing)]
+    [:main#app
      [:section.hero
       [:p.eyebrow "dj.ai.tooling / dev"]
       [:h1 "Progress graph builder"]
@@ -1025,40 +974,43 @@
      (when notice
        [:aside.notice {:data-level (name (:level notice))} (:message notice)])
      (filter-chips env)
-     (frontier-summary graph alias-of frontier)
-     [:div {:data-show "$creatingRoot"} (root-form graph)]
+     (frontier-summary graph alias-of frontier filters)
+     (when (= :root panel) (root-form graph))
      [:section.graph
       [:div.section-heading
        [:h2 "Topology"]
        [:div.heading-actions
         [:span (str (count nodes) (if (= 1 (count nodes)) " node" " nodes"))]
         [:button.mode-switch {:type "button"
-                              :data-on:click "$showingModelView = !$showingModelView"}
+                              :data-on:click "@post('/set-panel?panel=model')"}
          "LLM view"]
         [:button.mode-switch {:type "button"
-                              :data-on:click "$showingChanges = !$showingChanges"}
+                              :data-on:click "@post('/set-panel?panel=changes')"}
          "Changes"]
         [:button.mode-switch {:type "button"
-                              :data-on:click "$creatingRoot = true"}
+                              :data-on:click "@post('/set-panel?panel=root')"}
          "New node"]
         [:button.mode-switch {:type "button"
                               :title "Cheat sheet of every clickable gesture"
-                              :data-on:click "$showingHelp = !$showingHelp"}
+                              :data-on:click "@post('/set-panel?panel=help')"}
          "Help"]]]
-      (help-panel)
-      [:section.model-view {:data-show "$showingModelView"}
-       [:div.control-heading
-        [:span "Raw LLM rendered view"]
-        [:button {:type "button" :data-on:click "$showingModelView = false"} "Close"]]
-       [:pre (view)]]
-      (changes-panel graph alias-of)
+      (when (= :help panel) (help-panel))
+      (when (= :model panel)
+        [:section.model-view
+         [:div.control-heading
+          [:span "Raw LLM rendered view"]
+          [:button {:type "button" :data-on:click "@post('/set-panel')"} "Close"]]
+         [:pre (view)]])
+      (when (= :changes panel)
+        (changes-panel graph alias-of (or changes-cursor 0)))
       [:datalist {:id "layer-names"}
        (for [lname (layer-names graph)]
          [:option {:value lname}])]
-      [:datalist {:id "node-references"}
-       (for [node nodes]
-         [:option {:value (:alias node)}
-          (str (get kind-labels (:kind node)) " · " (:body node))])]
+      (when reference-editor?
+        [:datalist {:id "node-references"}
+         (for [node (:nodes full-topology)]
+           [:option {:value (:alias node)}
+            (str (get kind-labels (:kind node)) " · " (:body node))])])
       (if (seq nodes)
         [:div.node-list
          (map-indexed
@@ -1066,7 +1018,10 @@
             (node-card env node (roots (:id node))
                        (:id (get nodes (dec index)))))
           nodes)]
-        [:div.empty-state "The graph is empty. Add a root to begin."])]]))
+        [:div.empty-state
+         (if (seq (:order graph))
+           "Choose an inbox item, focus an alias, or show all."
+           "The graph is empty. Add a root to begin.")])]]))
 
 (def ^:private styles
   "
@@ -1325,6 +1280,82 @@
                      progress/statuses)]
     (commit! #(progress/set-status % node-id status) "Status updated.")))
 
+(defn- canonical-view-token [graph token]
+  (cond
+    (#{"all" "current-work" "questions" "actions" "synthesis" "triage"} token)
+    token
+
+    (str/starts-with? (or token "") "layer:")
+    (let [layer-name (subs token (count "layer:"))]
+      (parse-layer layer-name)
+      (str "layer:" layer-name))
+
+    (str/starts-with? (or token "") "context:")
+    (str "context:"
+         (progress/resolve-id graph (subs token (count "context:"))))
+
+    (str/starts-with? (or token "") "resolution:")
+    (str "resolution:"
+         (progress/resolve-id graph (subs token (count "resolution:"))))
+
+    :else
+    (throw (ex-info "Unknown graph view token." {:token token}))))
+
+(defn- update-ui! [f]
+  (swap! ui-state f)
+  (subscribed/mark-dirty! subscriptions)
+  {:status 204})
+
+(defn- set-view! [request]
+  (let [token (canonical-view-token (:graph @state)
+                                    (get-in request [:query-params "token"]))]
+    (update-ui! #(assoc % :filters [token] :editing nil))))
+
+(defn- add-view! [request]
+  (let [token (canonical-view-token (:graph @state)
+                                    (get-in request [:query-params "token"]))]
+    (update-ui! #(update % :filters (fn [filters]
+                                     (cond-> (vec filters)
+                                       (not (some #{token} filters)) (conj token)))))))
+
+(defn- remove-view! [request]
+  (let [token (canonical-view-token (:graph @state)
+                                    (get-in request [:query-params "token"]))]
+    (update-ui! #(update % :filters
+                         (fn [filters] (into [] (remove #{token}) filters))))))
+
+(defn- clear-view! [_request]
+  (update-ui! #(assoc % :filters [] :editing nil)))
+
+(defn- add-focus! [request]
+  (let [alias (present (:focusEntry (fused/signals request)))]
+    (if alias
+      (let [token (str "context:" (progress/resolve-id (:graph @state) alias))]
+        (update-ui! #(update % :filters
+                             (fn [filters]
+                               (cond-> (vec filters)
+                                 (not (some #{token} filters)) (conj token))))))
+      {:status 204})))
+
+(defn- set-panel! [request]
+  (let [panel (some-> (get-in request [:query-params "panel"]) keyword)]
+    (when-not (or (nil? panel) (#{:model :changes :root :help} panel))
+      (throw (ex-info "Unknown builder panel." {:panel panel})))
+    (update-ui! #(assoc % :panel (when-not (= panel (:panel %)) panel)))))
+
+(defn- set-editor! [request]
+  (let [node-ref (get-in request [:query-params "node"])
+        node-id (when node-ref (progress/resolve-id (:graph @state) node-ref))]
+    (update-ui! #(assoc % :editing (when-not (= node-id (:editing %)) node-id)))))
+
+(defn- set-changes-cursor! [request]
+  (let [raw (:changesCursor (fused/signals request))
+        cursor (if (or (nil? raw) (= "" raw)) 0 (parse-long (str raw)))]
+    (when-not (and (integer? cursor) (not (neg? cursor)))
+      (throw (ex-info "Changes cursor must be a non-negative integer."
+                      {:cursor raw})))
+    (update-ui! #(assoc % :changes-cursor cursor))))
+
 (defn app [request]
   (case [(:request-method request) (:uri request)]
     [:get "/"] (response/html-response (page))
@@ -1337,6 +1368,14 @@
     [:post "/edit-body"] (edit-body-request! request)
     [:post "/resolve-existing"] (resolve-existing! request)
     [:post "/set-status"] (set-status! request)
+    [:post "/set-view"] (set-view! request)
+    [:post "/add-view"] (add-view! request)
+    [:post "/remove-view"] (remove-view! request)
+    [:post "/clear-view"] (clear-view! request)
+    [:post "/add-focus"] (add-focus! request)
+    [:post "/set-panel"] (set-panel! request)
+    [:post "/set-editor"] (set-editor! request)
+    [:post "/set-changes-cursor"] (set-changes-cursor! request)
     response/not-found))
 
 (defn- write-nrepl-port! [server]

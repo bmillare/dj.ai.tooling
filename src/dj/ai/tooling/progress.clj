@@ -597,7 +597,11 @@
       :nodes nodes
       :frontier {}})))
 
-(defn- project-topology [graph node-ids projected-frontier]
+(defn project-topology
+  "Projects an explicit set of storage node ids into the canonical topology
+  shape used by renderers. Edges to omitted nodes are removed while
+  `:resolved?` retains whether a resolver exists outside the projection."
+  [graph node-ids projected-frontier]
   (let [node-ids (set node-ids)
         id->alias (:id->alias (aliases graph))]
     {:roots (into []

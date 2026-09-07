@@ -412,6 +412,16 @@
     (is (= [:done-b]
            (mapv :id (get-in view [:frontier :unsynthesized-dones]))))))
 
+(deftest explicit-topology-projection-removes-dangling-edges
+  (let [graph (example-graph)
+        view (progress/project-topology graph #{:root :question-a} {})
+        by-id (into {} (map (juxt :id identity)) (:nodes view))]
+    (is (= [:root] (:roots view)))
+    (is (= [:root :question-a] (mapv :id (:nodes view))))
+    (is (= [:question-a] (:spawn-children (by-id :root))))
+    (is (empty? (:resolved-by (by-id :question-a))))
+    (is (:resolved? (by-id :question-a)))))
+
 (deftest current-work-keeps-frontier-and-minimum-explanatory-topology
   (let [graph (-> (progress/empty-graph)
                   (progress/add-node {:id :root :kind :know :body "Root"
