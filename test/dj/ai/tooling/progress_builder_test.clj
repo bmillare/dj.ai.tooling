@@ -207,8 +207,9 @@
       (is (str/includes? body "Current work"))
       (is (str/includes? body "$graphFilter = &apos;current-work&apos;"))
       ;; three card visibility clauses (frontier item + ancestry + the
-      ;; untriaged capture, which the triage inbox keeps live) plus one chip
-      (is (= 4 (count (re-seq #"includes\(&apos; current-work &apos;\)" body)))))))
+      ;; untriaged capture, which the triage inbox keeps live) plus the
+      ;; removable chip and the top-bar entry button's hide-while-active guard
+      (is (= 5 (count (re-seq #"includes\(&apos; current-work &apos;\)" body)))))))
 
 (deftest lineage-lines-expand-the-visible-context
   (let [root (builder/record! {:kind :know :body "Shared parent"})

@@ -4,6 +4,7 @@
   Start with `nix develop --command clojure -M:graph-builder`, then open
   http://localhost:9090. A dj.recorder log is the persistence boundary."
   (:require [clojure.string :as str]
+            [dj.ai.tooling.markdown :as md]
             [dj.ai.tooling.progress :as progress]
             [dj.ai.tooling.progress-import :as imp]
             [dj.recorder :as recorder]
@@ -667,9 +668,12 @@
         [:button.add-node {:type "button"
                            :data-on:click__stop (str "$" editing " = true")}
          "Add node"]]]
-      [:p.body {:title "Click to show or hide node actions"
-                :data-on:click (str "$" editing " = !$" editing)}
-       (:body node)]
+      ;; div, not p: the rendered markdown contains its own block elements.
+      ;; The editor textarea binds the raw text via body-draft above, so
+      ;; markdown is a display concern only.
+      [:div.body {:title "Click to show or hide node actions"
+                  :data-on:click (str "$" editing " = !$" editing)}
+       (html/raw (:html (md/render (:body node))))]
       (when (seq distant-parents)
         [:div.lineage
          (for [parent-id distant-parents]
@@ -1104,7 +1108,19 @@
   .byline { color: #75787f; font-size: .7rem; font-weight: 600; }
   .resolution-filter { border: 0; background: transparent; padding: .2rem .35rem; text-decoration: underline; text-decoration-color: #54575e; text-underline-offset: .2rem; }
   .context-filter { border: 0; background: transparent; padding: .2rem .35rem; text-decoration: underline; text-decoration-color: #54575e; text-underline-offset: .2rem; }
-  .status[data-status=blocked], .status[data-status=cancelled] { color: #e6a1a1; } .body { font-size: 1.05rem; margin: .8rem 0 .45rem; white-space: pre-wrap; }
+  .status[data-status=blocked], .status[data-status=cancelled] { color: #e6a1a1; } .body { font-size: 1.05rem; margin: .8rem 0 .45rem; }
+  .body > :first-child { margin-top: 0; } .body > :last-child { margin-bottom: 0; }
+  .body :is(p, ul, ol, pre, table, blockquote) { margin: .35rem 0; }
+  .body :is(h1, h2, h3, h4, h5, h6) { font-size: 1em; line-height: 1.3; letter-spacing: normal; margin: .55rem 0 .25rem; }
+  .body ul, .body ol { padding-left: 1.25rem; } .body li { margin: .12rem 0; }
+  .body code { background: #24262c; border-radius: .3rem; padding: .06rem .3rem; font-size: .85em; }
+  .body pre { background: #0b0c0e; border: 1px solid #2b2d33; border-radius: .45rem; padding: .5rem .65rem; overflow-x: auto; }
+  .body pre code { background: transparent; padding: 0; font-size: .8rem; }
+  .body pre.raw-fallback { white-space: pre-wrap; }
+  .body a { color: #8ab4f8; }
+  .body blockquote { border-left: 3px solid #484b53; padding-left: .65rem; color: #a6a8ae; }
+  .body table { border-collapse: collapse; font-size: .85em; } .body th, .body td { border: 1px solid #2b2d33; padding: .25rem .55rem; text-align: left; }
+  .body hr { border: 0; border-top: 1px solid #2b2d33; }
   .id { display: block; color: #75787f; font-size: .68rem; overflow-wrap: anywhere; margin: .55rem 0; }
   .edges { color: #a6a8ae; font-size: .75rem; margin-top: .25rem; } .edges span { color: #75787f; margin-right: .45rem; }
   .lineage { margin: .5rem 0; display: grid; gap: .25rem; } .from-line, .resolve-line { position: relative; color: #a6a8ae; font-size: .72rem; padding: 0 0 0 1rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

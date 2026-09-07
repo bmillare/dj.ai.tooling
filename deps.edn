@@ -14,7 +14,14 @@
                 io.github.bmillare/dj.recorder
                 {:git/sha "059665e657e8d3d7d0ff25b8a2b8b2fa5e5845e9"}
                 io.github.bmillare/dj.web
-                {:git/sha "518b6fe21cf020af2cd21c27d2ac84707344c13c"}}
+                {:git/sha "518b6fe21cf020af2cd21c27d2ac84707344c13c"}
+                ;; Focused flexmark modules for markdown node bodies
+                ;; (flexmark-all also pulls in PDF tooling). The URL gate in
+                ;; dj.ai.tooling.markdown is part of the safety contract.
+                com.vladsch.flexmark/flexmark {:mvn/version "0.64.8"}
+                com.vladsch.flexmark/flexmark-ext-tables {:mvn/version "0.64.8"}
+                com.vladsch.flexmark/flexmark-ext-gfm-strikethrough {:mvn/version "0.64.8"}
+                com.vladsch.flexmark/flexmark-ext-autolink {:mvn/version "0.64.8"}}
    :main-opts ["-m" "dj.ai.tooling.progress-builder"]}
 
   :nrepl
@@ -30,6 +37,10 @@
                 {:git/sha "059665e657e8d3d7d0ff25b8a2b8b2fa5e5845e9"}
                 io.github.bmillare/dj.web
                 {:git/sha "518b6fe21cf020af2cd21c27d2ac84707344c13c"}
+                com.vladsch.flexmark/flexmark {:mvn/version "0.64.8"}
+                com.vladsch.flexmark/flexmark-ext-tables {:mvn/version "0.64.8"}
+                com.vladsch.flexmark/flexmark-ext-gfm-strikethrough {:mvn/version "0.64.8"}
+                com.vladsch.flexmark/flexmark-ext-autolink {:mvn/version "0.64.8"}
                 io.github.cognitect-labs/test-runner
                 {:git/tag "v0.5.1" :git/sha "dfb30dd"}
                 org.clojure/data.json {:mvn/version "2.5.2"}}
