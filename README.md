@@ -272,6 +272,39 @@ net.clojars.bmillare/dj.ai.tooling {:mvn/version "0.1.0-alpha1"}
 The next milestone is continued dogfooding of snapshots and patching, followed
 by refinement from observed model and integration behavior.
 
+### Local API editing
+
+A second dev-only consumer sends selected snapshots and a task to a configured
+chat-completion endpoint using structured `edit_file` calls. It retains ordered
+patch IDs, repairs only missing or ambiguous searches with `revise_edit`, and
+re-stages the whole proposal against its original snapshots. Requests have
+explicit timeout, byte, token, and repair-turn limits. It pauses at a diff for
+human review; literal `commit` writes that exact Changeset.
+
+```bash
+nix develop --command clojure -M:local-api local-api.edn task.txt README.md
+```
+
+See [the local API editing contract](doc/design/local-api-editing.md#implemented-api-and-terminal-consumer)
+for configuration, runtime functions, termination semantics, and opt-in live
+smoke tests. The manual clipboard workflow remains available.
+
+### Standalone payload text resolution
+
+`dj.ai.tooling.payload/resolve` composes named text fragments and calculates
+string quoting at each language boundary. It returns final text and a trace;
+it never executes the result. The standalone local API tools use flat
+`define_payload(id, lang, body)` and `resolve_payload(lang, body)` calls so bodies
+occupy native string parameters rather than pre-encoded JSON documents.
+
+```bash
+nix develop --command clojure -M:payload-api payload-api.edn task.txt
+```
+
+See [the payload contract](doc/design/payload.md) for the pure API, configuration,
+reference escapes, limits, native transport probes, and observed model fidelity
+limits. XML transport and execution are deferred.
+
 ### Progress graph builder
 
 The dev-only graph builder manually exercises the progress core with a

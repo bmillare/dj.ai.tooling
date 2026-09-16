@@ -44,8 +44,8 @@
   "cases minus NUL bytes, for round-trips that cross argv: process arguments
    are NUL-terminated C strings on every OS, so a NUL byte is physically
    unrepresentable in a command line — the limit is execve, not the
-   serializer (s-bash still escapes NUL as \\000 in the literal *text*; the
-   value just can't survive the process boundary). The python test uses
+   serializer (the shell serializers reject NUL rather than emitting a
+   literal whose value cannot survive the shell). The python test uses
    stdin, which carries NUL, so it keeps the full alphabet."
   (mapv (fn [s] (apply str (remove #(= (int %) 0) s))) (cases rng n)))
 

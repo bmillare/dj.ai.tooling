@@ -195,7 +195,9 @@
         (Files/deleteIfExists old)
         (Files/deleteIfExists new)))))
 
-(defn- review! [changeset]
+(defn review!
+  "Displays the diff for an exact staged Changeset."
+  [changeset]
   (if (= :ready (:status changeset))
     (let [basis-by-file (into {} (map (juxt :file identity)) (:basis changeset))]
       (doseq [{:keys [file] :as change} (:changes changeset)]

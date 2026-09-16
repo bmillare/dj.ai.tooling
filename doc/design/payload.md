@@ -1,340 +1,257 @@
-# Payload in Clojure — Implementation Sketch
+# Payload text resolution
 
-## The shape of the library
+Status: pure resolver and standalone local API tools implemented. The previous
+XML parser and execution sketches were nonfunctional scaffolds; they have been
+removed. XML transport and execution are deferred. This implementation does not
+run commands or feed resolved text into editing tools.
 
-One pipeline, four pure stages, two small registries. Everything above `exec` is a pure function of the input string, so the whole serialization path is testable without a process:
+## Purpose
 
-```
- llm-text (String)
-     │  payload.parser/parse    nonce-tag scan, no XML machinery
-     ▼
- doc  {:blocks {id → Block} :root Block}
-     │  payload/validate   fail fast, model-readable errors
-     ▼
- doc
-     │  payload/resolve    bottom-up, S[parent.lang] per hop
-     ▼
- {:final "ssh … $'…'"  :trace [[id resolved] …]}
-     │  payload.tools/run       the only impure step
-     ▼
- {:status :completed :exit n :stdout … :stderr … :final-cmd … :trace …}
+Let a model author separate native text fragments while the host calculates
+quoting at each language boundary. Each reference is replaced by a complete
+string literal for the **referring block's language**, containing the resolved
+value of its dependency:
+
+```text
+python body:  print("hello")
+config body:  {"script": {{python}}}
+root body:    (load-config {{config}})
 ```
 
-Namespaces: `payload` (public API), `payload.parser`, `payload.refs`, `payload.strings` (the S table), `payload.tools` (executors). Each has one job; each is ~50–150 lines. No protocol, no plugin system, no config object. A `defmap` is the extension mechanism.
+Here `config` uses JSON quoting and the root uses Clojure quoting. The Python
+body is authored once; the model never computes the outer layers of escaping.
+Resolution returns text and a trace. It does not interpret that text as a
+program, write files, or invoke a subprocess.
 
-The whole design reduces to one invariant:
+## Native transport is part of the design
 
-> **Every `{{ref}}` is replaced, in the referencing block, by `S[referring-block.lang](resolved-text-of-ref).` Nothing else happens.**
+A transport must place large bodies in native string parameter values, not
+attributes, map keys, or pre-serialized JSON strings. The local API variant uses
+flat tools:
 
-If you hold that line, depth invariance, locality, and collision immunity all fall out for free (argued below).
+| Tool | Parameters | Result |
+| --- | --- | --- |
+| `define_payload` | `id`, `lang`, `body` — all strings | Retains one exact body. |
+| `resolve_payload` | `lang`, `body` — both strings | Returns final text and trace. |
 
----
+Each body is a **top-level string parameter**. There is no `document_json`
+parameter or nested JSON document for the model to encode. The host retains
+pieces across turns, so a model can emit one definition per turn or several
+calls at once. Metadata stays separate from content. No call can execute text.
 
-## Data model
+The chat-completion API represents function arguments as JSON strings. That is
+the server's wire representation, not necessarily the syntax the model emits.
+The client decodes it exactly once. It does not strip quotes from body values,
+trim them, normalize newlines, or apply an extra unescaping pass. Original
+assistant messages and call IDs are kept for replay.
+
+For the served `gemma-4-12b` template on llama.cpp `b10902-df03399b8`, inspection
+on 2026-09-16 UTC found that string arguments are rendered between `<|"|>` tokens:
+
+```text
+body:<|"|>  print("hello")
+path = "C:\tmp\file"
+<|"|>
+```
+
+The ordinary quotes, backslashes, and newlines are raw inside that carrier.
+`/apply-template` confirmed that replay preserves those characters, and a native
+`/completion` probe confirmed that the model can generate that exact raw body.
+The flat shape also avoids forcing bodies inside object/array arguments that a
+template might encode differently. Qwen's parameter-body format motivates the
+same shape, but this implementation does not parse Qwen tags or assume that all
+models/templates behave identically. Recheck the served template when changing
+models or server builds.
+
+Raw placement is not a guarantee of arbitrary-string transport. Native special
+delimiters remain a carrier limitation; a model can also omit or change ordinary
+characters. In the initial API probe Gemma normalized a requested CRLF to LF.
+A separate free-form terminal composition trial also dropped leading spaces and
+a trailing newline. The resolver preserves the decoded value it receives, not an
+intended value the model failed to emit. Live tests must compare strings exactly and expose this
+failure; normalizing it away would invalidate the check. We do not claim that
+all strings need zero escaping or that one successful sample proves reliability.
+
+## Pure Clojure contract
+
+`dj.ai.tooling.payload` exposes `validate-blocks`, `validate`, and `resolve`.
+Documents use plain maps/vectors, with keyword languages:
 
 ```clojure
-(defrecord Block [id kind lang tool body])
-;; kind: :var or :exec
-;; :var  → id + lang required, tool nil
-;; :exec → tool + lang required, id unused
+(require '[dj.ai.tooling.payload :as payload])
 
-;; doc:
-;; {:blocks {"config_json" #Block{...} "clj_script" #Block{...}}
-;;  :root    #Block{:kind :exec :tool :bash :lang :bash ...}}
+(payload/resolve
+ {:blocks [{:id "config" :lang :json :body "{\"script\": {{python}}}"}
+           {:id "python" :lang :python :body "print(\"hello\")\n"}]
+  :root {:lang :clojure :body "(load-config {{config}})"}})
+;; => {:final "...host-quoted Clojure text..."
+;;     :trace [["python" "print(\"hello\")\n"] ["config" "...resolved JSON..."]]}
 ```
 
-Plain records, plain map. The parser is order-insensitive — a `<var>` may appear before or after the `<exec>`, refs may point forward — because resolution is topological, not sequential. This dissolves the "payloads-first vs inline" question: both work, no state.
+The escapes in this example are Clojure source notation, not instructions for a
+model's native tool output.
 
----
+Definitions have exactly `:id`, `:lang`, and `:body`. The root has exactly
+`:lang` and `:body`; it does not need a name or tool. IDs match
+`[A-Za-z_][A-Za-z0-9_-]*`, are unique within a document, and may be referenced
+before definition. Duplicate IDs are rejected rather than overwritten.
+`validate-blocks` checks definitions without requiring forward references to
+exist yet; `validate` checks the whole document's shapes and references.
+`resolve` performs that validation itself, then checks cycles and output bounds.
 
-## Stage 1 — parse
+Supported languages are `:bash`, `:sh`, `:clojure`, `:edn`, `:python`, `:json`,
+`:yaml`, `:raw`, and `:text`. Bash uses ANSI-C string literals; sh uses POSIX
+single quoting. Shell literals cannot preserve NUL, so shell serialization
+rejects it explicitly. `:raw` and `:text` insert resolved values without quoting
+and are useful for text assembly. Other languages insert complete string
+literals, including their surrounding quotes. The child's language controls
+references *inside that child*, not how its parent quotes the child's value.
 
-**Key decision: no XML library.** A real XML parser would reject the most natural payloads — a bash block containing `&&`, `2>&1`, `< /dev/null` — and would force the model to XML-escape, which destroys syntactic isolation. The nonce exists precisely so we *don't* need a real parser: the only thing we must find is the literal closing tag string.
+### Reference rules
 
-The algorithm is a linear scan:
+- `{{id}}` and `{{ id }}` reference a named block.
+- References must be naked: an immediately adjacent single or double quote
+  produces a positioned error. This is a local guard, not a parser proving the
+  reference is in a valid string-value position.
+- `\{{` emits literal `{{`, including when the following name exists. An extra
+  backslash before that escape survives. Malformed reference-like text such as
+  `{{-invalid}}` is literal; a well-formed unknown reference is an error.
+- Input bodies are scanned once into literal/reference tokens. Expanded values
+  are never scanned again, so literal reference text inside a child cannot
+  become a new reference when inserted into its parent.
+- Every definition is validated and resolved, including unused definitions.
+  Cycles and unknown references cannot hide in unused pieces.
+
+Resolution is deterministic, memoized, and bottom-up. An explicit traversal
+stack avoids recursion on the JVM stack. Trace entries appear once per named
+block, dependencies first, with input definition order breaking independent
+ordering ties. Root is returned separately as `:final`. Trace strings are the
+resolved values *before* their parents quote them.
+
+### Limits and errors
+
+Optional limits are the second argument to `validate-blocks`, `validate`, and
+`resolve`. Overrides merge with these defaults; unknown keys and nonpositive or
+noninteger values are rejected:
 
 ```clojure
-(def ^:private opener
-  #"<(var|exec)(-([A-Za-z0-9_-]+))?\s+([^>]*)>")
-
-(defn parse [text]
-  (loop [i 0 blocks {} root nil]
-    (if-let [m (re-find opener text i)]
-      (let [kind    (keyword (nth m 1))
-            nonce   (nth m 3)
-            attrs   (parse-attrs (nth m 4))          ;; id="…" lang="…" tool="…"
-            body-0  (end m)
-            close   (str "</" (name kind) (when nonce (str "-" nonce)) ">")
-            close-i (.indexOf text close body-0)]     ;; ← the entire nonce mechanism
-        (if (nil? close-i)
-          (throw (ex-info (str "unterminated <" (name kind) "> block")
-                          {:stage :parse :at body-0}))
-          (let [b #Block[(get attrs :id) kind (get attrs :lang)
-                         (get attrs :tool)
-                         (.substring text body-0 close-i)]]
-            (recur (+ close-i (count close))
-                   (if (= kind :var) (assoc blocks (get attrs :id) b) blocks)
-                   (if (= kind :exec) b root)))))
-      {:blocks blocks :root root})))
+{:max-blocks 128
+ :max-input-chars 1048576
+ :max-output-chars 1048576
+ :max-total-chars 4194304
+ :max-depth 32}
 ```
 
-Properties this buys:
+Character counts use UTF-16 code units. Input includes all bodies and root.
+Output limits apply to each resolved block/root, and total output includes all
+retained intermediate values plus root. Root counts toward depth but not named
+block count. Repeated references and nested quoting can expand output much more
+than linearly; this implementation bounds expanded data rather than assuming
+linear growth. Each fragment is checked before being appended to its output
+buffer; a bounded child's literal may be temporarily allocated before that
+check. Callers should choose limits appropriate to their available memory.
 
-- **Delimiter collision immunity for the envelope.** A payload may contain `</var>`, quotes, `&`, `<` — anything. The close we search for is `</var-9f2>`; a payload would need to contain that exact literal string to break out.
-- **Nonce mismatch is self-healing.** A stray `</var-abc>` inside a `var-9f2` payload is simply not the close string, so the scan skips it.
-- **Surrounding prose is ignored.** The LLM can emit commentary around the blocks; the parser extracts wherever they are. Robustness win, zero cost.
-- **The nonce is LLM-emitted and host-verified** (open and close must match per block). No host-side nonce registry, no shared state across turns. The library is a pure function of one text blob.
+Failures throw `ex-info` with `:type :invalid-payload`, `:stage` (`:validate` or
+`:resolve`), `:reason`, and applicable `:block`, `:ref`, `:at`, or limit fields.
+Offsets are zero-based UTF-16 positions in the original block body. Messages
+explain how to repair the input. A failed resolution returns no partial final
+text. The API adapter converts these exceptions to structured tool diagnostics.
 
-`parse-attrs` is a dozen lines (whitespace-split `key="value"`). Attribute values are double-quoted; that's the one place the model must follow a format rule, and it's the rule LLMs already follow perfectly.
+## Local API state and continuation
 
----
+`dj.ai.tooling.local-api.payload` provides:
 
-## Stage 2 — validate
+- `tool-definitions` and `instructions`: the model-facing contract.
+- `initial-state`: immutable collecting state with explicit limits.
+- `accept-response`: pure, atomic validation and state transition.
+- `tool-results`: one result correlated to each accepted wire call ID.
+- `run!`: a bounded HTTP conversation returning state and replay messages.
 
-A flat checklist, run once, all failures reported with block id and character offset:
+Definitions are immutable within a session. Each response may define several
+pieces and supply at most one root. All definitions from that response are
+collected before resolving its root, regardless of call order. On any invalid
+call, duplicate ID, invalid graph, or limit error, the response's entire update
+is rejected and the previous state is retained. There is no partial acceptance.
+Start a new session to replace definitions or change the basis of composition.
 
-1. Every `:var` has an `id` matching `[A-Za-z_][A-Za-z0-9_-]*`; ids unique. (Same charset as refs, so any valid id is referenceable.)
-2. Exactly one `:exec`; it has a `tool` that exists in the tool registry.
-3. Every block's `lang` is a key in the S table. (Fail fast on `lang="clojureclj"` typos rather than silently identity.)
-4. Every `{{ref}}` in every body names a declared id.
-5. **Refs are naked.** If the char immediately before `{{` or after `}}` is `"` or `'` → error.
+A definition-only response returns `:collecting`; acknowledgments identify
+stored IDs without echoing large bodies. A root returns `:resolved`, with
+`{:final ... :trace ...}` under the returned state's `:result`. Only the root
+call's result includes this text. Results explicitly state `executed: false`.
+A no-call answer terminates the session as `:answer`. Malformed responses,
+transport failures, resolution errors, or exhausted turns stop the automatic
+workflow with diagnostics. There is no automatic repair or execution loop.
 
-Rule 5 implements the "practical fix": the host owns quoting, and the model's one slip mode — writing `"{{clj_script}}"` — is detected structurally instead of producing a subtly corrupted command (a double-quoted `$'…'` is not ANSI-C-quoted to bash; it degrades to literal `$'…'` text). The error message is written for the repair loop:
+`run!` takes a task string and config, with an optional injected request function
+matching `local-api.client/complete!` for tests. Config supplies the HTTP client's
+URL/model/timeout/response-byte/token budgets, positive `:max-turns`, optional
+`:payload-limits`, and generation options. Editing's repair-turn budget is
+unused and internally set to zero. Requests use the same bounded HTTP client
+and shared complete-response decoder as editing, but payload state is separate.
 
+The dev-only terminal consumer prints final text without executing it:
+
+```bash
+nix develop --command clojure -M:payload-api payload-api.edn task.txt
 ```
-:stage :validate, block "subshell_cmd", at 9:
-ref {{clj_script}} is wrapped in quotes. Insert the ref naked; the host adds quoting.
-```
 
-This is worth stating as a design principle: **error text is an interface.** The consumer of this library is an agent harness that pastes the error back into the model. Every message should be imperative, name the block, and say exactly what to do differently.
-
-Rule 4 interacts with an escape hatch in the expander (next section) — the unknown-ref error message teaches it: *"if you meant the literal text `{{foo}}`, write `\{{foo}}`."*
-
----
-
-## Stage 3 — the S table (the heart)
-
-One map, one entry per language, each entry a **total** function `String → String` that returns a complete string *literal* (quotes included) in that language whose value is the input:
+Example configuration:
 
 ```clojure
-(defn s-bash [s]    ;; ANSI-C quoting, for bash-flavored carriers
-  (str "$'"
-       (apply str (for [c s]
-                    (case c
-                      \\       "\\\\"
-                      \'       "\\'"
-                      \newline "\\n"
-                      \tab     "\\t"
-                      \return  "\\r"
-                      (if (< (int c) 32)
-                        (format "\\0%03o" (int c))
-                        c))))
-       "'"))
-
-(defn s-sh [s]      ;; POSIX single-quoting, portable to dash/busybox
-  (let [q (fn [c] (if (= c \') "'\\''" (str c)))]
-    (str "'" (apply str (map q s)) "'")))
-
-(def safe-string
-  {:bash    s-bash
-   :sh      s-sh
-   :clojure pr-str        ;; pr-str of a string *is* the EDN literal
-   :edn     pr-str
-   :python  s-python      ;; double-quoted, \" \\ \n \t \uNNNN for C0
-   :json    s-json
-   :yaml    s-json        ;; JSON double-quoted scalars are valid YAML — reuse
-   :raw     identity
-   :text    identity})
+{:base-url "http://127.0.0.1:8080/v1"
+ :model "gemma-4-12b"
+ :timeout-ms 120000
+ :max-response-bytes 1048576
+ :max-tokens 4096
+ :max-turns 8
+ :payload-limits {:max-output-chars 1048576}
+ :generation-options {"temperature" 0
+                      "chat_template_kwargs" {"enable_thinking" false}}}
 ```
 
-Notes:
+## Validation and native transport probes
 
-- **Quoting and escaping are one function.** `S[lang]` returns the finished literal, so "the host owns both the escaping and the quoting" is literally true — there is no step where a bare value and its quotes are separate things.
-- **`:bash` vs `:sh` is a deliberate split.** `$'…'` is not POSIX; `ssh` to a host whose login shell is dash will mangle it. The `lang` attribute on the block doubles as a portability declaration: the model writes `lang="sh"` for strict-POSIX carriers. One extra table entry, and the classic ssh-quoting footgun becomes a declared choice.
-- **The child's `lang` is not used in v1 resolution** — only the *referencing* block's lang is. It's still required because (a) it makes the document self-describing for humans and for the trace, (b) it's what a future content validator or AST-based check would consume, and (c) it costs the model one attribute.
+The default suite tests exact decoded strings, nested JSON/Clojure round trips,
+shell/Python literal round trips, escaped and unknown references, cycles,
+forward references, shared dependencies, atomic updates, bounded expansion,
+conversation replay, and termination. It does not contact a model endpoint.
 
-**Why this composes at arbitrary depth (the answer to "depth invariance"):**
+The fixed integration fixtures also run resolved text through Bash → Python →
+JSON, POSIX sh → Bash → Python → JSON, and Bash → Clojure → EDN. They compare
+stdout bytes with the original values, including quotes, backslashes, Unicode,
+CRLF, trailing newlines, literal references, shell metacharacters, and empty
+strings. The extra shell layer uses the same inner definitions. Processes have
+a deadline and separate output capture; no model-generated programs are run.
+A NUL carried literally through Clojure/EDN is rejected at the shell boundary,
+with diagnostics identifying the referring root and script. These fixtures are
+part of the normal suite under `nix develop`, with no live endpoint required.
 
-Each hop applies exactly one `S` to an opaque byte string. Layer *n* never inspects layer *n-1*'s content — it only quotes it. So per-byte cost is O(depth), never superlinear, and correctness at depth *d* is just *d* applications of a property that is proven once, per language, at depth 1. The innermost payload is **byte-identical** in the model's output, in the trace, and (as a decoded value) at the target runtime — it is never transformed by anything the model computes. The model's escaping work is exactly zero, at any depth.
+Run just these integration fixtures:
 
-**Proof strategy (this is the core of the test suite):** round-trip through the real interpreter, property-based:
-
-```clojure
-(prop [s a string]
-  (= s (bash-arg-capture (s-bash s))))
-;; bash-arg-capture: run `bash -c "printf %s " <literal>` and slurp stdout
+```bash
+nix develop --command clojure -M:test -n dj.ai.tooling.payload.chains-test
 ```
 
-Same pattern for `python3 -c "import sys; sys.stdout.write(sys.argv[1])" <literal>`, `clj -e "(print <literal>)"`, JSON via a reader, YAML likewise. Generate from an alphabet saturated with `' " \`, newlines, `</var-`, `{{`, C0 control bytes, and non-ASCII. If these round-trips hold, delimiter-collision immunity is not a claim, it's a regression suite.
+Opt in to exact-body API tests (LF and CRLF cases):
 
----
-
-## Stage 4 — resolve (and how "no recursive resolution" is true)
-
-This is where your open question lives, so let me be precise. There are two different dangers that are easy to conflate:
-
-**Danger A — re-expansion.** A naive implementation inlines templates top-down and iterates to a fixed point ("keep substituting until no `{{` remain"). Then `{{x}}` text that arrives *inside already-expanded content* gets expanded a second time.
-
-**Danger B — data/template ambiguity.** A block's own body is the model's template. If the model's payload *contains* the literal text `{{name}}` (a Python f-string printing literal braces is a real example: `f"{{name}}"` in source) and `name` is a declared id, that block's own expansion corrupts its own data.
-
-The design kills A by construction and gives B a one-branch escape:
-
-- **Bottom-up, memoized.** A block is expanded only after all its dependencies have *resolved to final strings*. When the expander splices in a dependency's value, that value is already an inert string — there is no later pass that could see it.
-- **Single left-to-right pass over each body.** The expander appends substituted text to an output buffer and *never re-scans the buffer*. Each body is scanned exactly once, in its lifetime, in the whole system. No fixed-point loop exists anywhere in the code, so A is not prevented by a check — it's structurally impossible.
-- **`\{{` is the only escape**, and it exists for B: `\{{foo}}` in a body yields literal `{{foo}}` in the output. A `{{…}}` in a body is *either* a ref to a declared id *or* a parse-level error — there is no third option, and the error message teaches the escape. (Malformed `{{` that isn't a well-formed ref at all, e.g. `{{-trim`, passes through as literal — safe and lenient.)
-
-```clojure
-(def ^:private REF #"\{\{\s*([A-Za-z_][A-Za-z0-9_-]*)\s*\}\}")
-
-(defn- expand [body lang env]
-  ;; env: {id → resolved final string}, complete for all refs of this block
-  (let [s (get safe-string lang)]
-    (loop [buf (StringBuilder.) i 0]
-      (if (>= i (.length body))
-        (str buf)
-        (let [c (.charAt body i)]
-          (cond
-            ;; \{{  →  literal {{   (the one escape)
-            (and (= c \\\) (.startsWith body "{{" (inc i)))
-              (recur (doto buf (.append "{{")) (+ i 3))
-
-            ;; {{id}}  →  splice S[lang](resolved dep); output is never rescanned
-            (.startsWith body "{{" i)
-              (let [m (re-find REF body i)]
-                (if (and m (contains? env (second m)))
-                  (do (.append buf (s (get env (second m))))
-                      (recur buf (end m)))
-                  (throw (ex-info
-                           (str "ref at " i " is not a declared id; "
-                                "to emit literal {{, write \\{{")
-                           {:stage :resolve :at i}))))
-
-            :else (recur (doto buf (.append c)) (inc i))))))))
+```bash
+DJ_TOOLING_LIVE_CONFIG=payload-api.edn nix develop --command clojure -M:test \
+  -n dj.ai.tooling.local-api.payload-live-test
 ```
 
-(Whitespace tolerance inside `{{ id }}` is deliberate: it's one regex tweak that absorbs a whole class of model slip. Id charset stays strict.)
+Inspect Gemma's native output *before tool parsing* and its replay rendering:
 
-The resolver is a DFS with a memo and a visiting set:
-
-```clojure
-(defn resolve [doc]
-  (let [blocks (:blocks doc)
-        memo   (atom {})
-        seen   (atom #{})]
-    (letfn [(refs-of [b] (into #{} (map second (re-seq REF (:body b)))))  ;; skip \{{ in v1.1
-            (go [id]
-              (cond
-                (contains? @memo id) (get @memo id)
-                (contains? @seen id) (throw (ex-info (str "cycle at " id)
-                                                    {:stage :resolve :id id}))
-                :else (do (swap! seen conj id)
-                          (doseq [r (refs-of (blocks id))] (go r))
-                          (swap! seen disj id)
-                          (let [v (expand (:body (blocks id))
-                                          (:lang (blocks id))
-                                          @memo)]
-                            (swap! memo assoc id v)
-                            v))))]
-      (let [root (go (:id-root))]   ;; id of the exec block
-        {:final root :trace (vec (sort-by (comp :layer memo) (keys @memo)))}))))
+```bash
+nix develop --command python3 dev/payload_native_probe.py \
+  --base-url http://127.0.0.1:8080 --output /tmp/payload-native.json
 ```
 
-(For a foundation library the atom is fine; it's one document at a time. `refs-of` should be made escape-aware — a two-line change — or, simpler in v1, `validate` can reject bodies where an escaped `\{{` is followed by a declared id, which is a vanishingly rare case.)
+This probe uses llama.cpp's `/apply-template` and `/completion` endpoints, finite
+request/response limits, and a 512-token generation limit. It prints raw output
+and checks native delimiter-wrapped bodies. `--crlf` exercises newline fidelity;
+`--open`, `--close`, and `--stop` select another template's known delimiters.
+It does not implement a production native-tag parser or execute model output.
 
-**The trace is the memo.** It's free, it's always produced, and it directly serves the observability criterion: a human reads the model's raw output (already native-grammar, no mental unescaping), and the trace shows each layer's resolved value in build order, so "which layer broke" is a one-line diff between layer *n-1* and layer *n*.
-
-Worked shape for the polyglot example:
-
-```clojure
-{:final "ssh prod-jump-host $'(let [cfg (json/parse-string \"{\\\"database\\\": ...}\")]\n  (println ...))'"
- :trace [["config_json"  "{\"database\": \"prod-east\", ...}"]
-         ["clj_script"   "(let [cfg (json/parse-string \"{\\"database\\": ...}\")]\n  ...)"]
-         ["subshell_cmd" "bb -e $'(let [cfg (json/parse-string ...')"]]}
-```
-
-Note the asymmetry that *is* the design: the model emitted three clean native blobs; every backslash in the trace was computed by the host.
-
----
-
-## Stage 5 — exec
-
-A tool registry, one entry per executor. In v1 ship `:bash` only; the interface already anticipates the north star's "few common-case base executors":
-
-```clojure
-(def tools
-  {:bash (fn [{:keys [cmd stdin timeout-ms workdir]}]
-           (let [p (doto (ProcessBuilder. ["bash" "-c" cmd])
-                    (when workdir (.directory workdir))
-                    (.start))]
-             (timeout-watchdog p timeout-ms)   ;; destroyForcibly
-             {:exit   (.waitFor p)
-              :stdout (slurp (.getInputStream p))
-              :stderr (slurp (.getErrorStream p))}))})
-```
-
-`stdin` is in the spec map but always nil in v1 — that's the seam for the manifest's `to="stdin"` binding, and it costs nothing now because it reflects how OS processes actually work, not speculative API surface. (An `:execv` tool is deliberately *not* in v1: it needs a structured argv contract that a single serialized string can't safely provide — that's a manifest-era feature, and the registry is the extension point.)
-
-**The error/result line** — keep it sharp:
-
-- **Serialization failure** (parse / validate / resolve) → exception: `(ex-info msg {:stage :parse|:validate|:resolve :block id :at n})`. The command never ran; flow is interrupted; the harness feeds the message back to the model.
-- **The command ran** → always a result map, *including* nonzero exit. An exit 1 is data the agent must reason about, not an exception. Only spawn failure (unknown tool, OS error) throws, with `:stage :exec`.
-
----
-
-## Public API
-
-```clojure
-(ns dj.ai.tooling.payload
-  "Deterministic serialization and resolution of nested command payloads.")
-
-(defn parse    [text]       "String → doc. Throws {:stage :parse}."
-(defn validate [doc]        "doc → doc. Throws {:stage :validate}."
-(defn resolve  [doc]        "doc → {:final String :trace [[id resolved] …]}. Throws {:stage :resolve}."
-(defn run      [text opts]  "opts: {:timeout-ms, :workdir}. Composes the above + payload.tools/run.
-                             Returns {:status :completed :exit n :stdout :stderr
-                                      :final-cmd :trace}. Throws on serialization failure.")
-```
-
-Four entry points, no overloading, no options beyond what the OS boundary genuinely has. `parse`/`validate`/`resolve` are exposed individually because they are the natural seams — each is a distinct failure stage and an independent unit of test.
-
----
-
-## The model-facing contract
-
-Correctness depends on the prompt, so it's part of the implementation. The entire contract is five lines in the tool description:
-
-```
-1. Wrap each self-contained piece in <var id="…" lang="…">. Write the
-   payload exactly as you would in a file. You never escape anything.
-2. Put the final command line in <exec tool="bash" lang="bash">.
-3. Reference a var as {{id}} — naked. Never quote it, never escape it.
-4. The host resolves all references and does all quoting. You never
-   compute a final command.
-5. If a payload must contain literal {{, write \{{.
-```
-
-That's the whole syntax burden on the probabilistic side: tags, ids, naked refs. Everything fragile is deterministic and host-side.
-
----
-
-## How this lands the eval criteria
-
-- **Syntactic isolation** — payloads are 100% native grammar; a block can be authored with zero knowledge of the outer layers (the only cross-block commitment is the id name, chosen locally).
-- **Depth invariance** — model output size is linear in payload size regardless of depth; the innermost payload is byte-identical end to end; per-hop host cost is one S application.
-- **Delimiter collision immunity** — nonce for the envelope, total S functions for the carriers, proven by round-trip property tests, not asserted.
-- **Generation locality** — no forward planning, no structural backtracking; the DAG is resolved after the fact, order-insensitively.
-- **Probabilistic reliability** — the failure surface presented to the model is tiny (malformed tag, unknown ref, quoted ref, bad lang) and every failure is loud, positioned, and self-correcting via the error message.
-- **Observability** — raw output is human-readable by construction; the trace localizes the failing layer; stderr is captured; stages are tagged.
-- **Brent's extras** — token count: the model emits each payload *once*, unescaped (strictly fewer tokens than inline escaping; overhead is a few tag tokens per block); semantics: the executed innermost command is exactly what the model wrote, so no semantic drift is possible; generality: adding a case = one map entry in `safe-string` or `tools`, no harness changes.
-
----
-
-## What v1 deliberately cuts (and where the seams are)
-
-- **Manifest** (`as="raw"`, `to="stdin"`, file carriers) — cut. The seam: `expand` currently hardcodes value-binding; a manifest becomes an `as` parameter to the splice step, and the executor spec already carries `:stdin`.
-- **Raw code splice** — same seam as above; in v1, a ref in a non-literal position (e.g., command position) gets quoted and fails at runtime, visibly. Documented contract: *"every ref is a value."*
-- **AST/tree-sitter auto-escaping** — cut. The `lang` attribute *is* the declaration of which escaping rules apply; that answers the "how do we determine which escaping rules" question in its cheapest correct form. Content-based validation is a future *checker*, not a core change.
-- **`<exec>` per block / multi-root graphs** — cut; one root per document, one turn.
-- **Nonce generation on the host** — not needed; the host never has to *predict* a collision, only *match* one.
-
-The test that should exist before anything else is green is the round-trip suite in Stage 3. Everything else in this design is plumbing around it.
+XML nonce envelopes, raw execution, editing integration, persistence, mutable
+cross-session variables, AST validation, and provider abstraction machinery are
+outside this implementation.

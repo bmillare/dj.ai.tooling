@@ -1,10 +1,17 @@
 (ns dj.ai.tooling.payload.strings
-  "Stage 3: the S table. One total function per language: String -> String,
-   returning a complete string literal (quotes included) whose value is the input.")
+  "Stage 3: the S table. One serializer per language: String -> String,
+   returning a complete string literal (quotes included) whose value is the input. Shell serializers reject NUL."
+  (:require [clojure.string]))
+
+(defn- reject-nul [s]
+  (when (clojure.string/includes? s (str (char 0)))
+    (throw (ex-info "Shell string values cannot represent NUL; choose another carrier."
+                    {:reason :unrepresentable-character :lang :shell :character 0}))))
 
 (defn s-bash
   "ANSI-C quoting ($'...'), bash-flavored carriers only."
   [s]
+  (reject-nul s)
   (str "$'"
        (apply str (for [c s]
                     (case c
@@ -21,6 +28,7 @@
 (defn s-sh
   "POSIX single-quoting, portable to dash/busybox."
   [s]
+  (reject-nul s)
   (let [q (fn [c] (if (= c \') "'\\''" (str c)))]
     (str "'" (apply str (map q s)) "'")))
 
