@@ -5,7 +5,13 @@
   org.clojure/data.json {:mvn/version "2.5.2"}}
 
  :aliases
- {:payload-api
+ {:chat
+  {:extra-paths ["dev"]
+   :extra-deps {io.github.bmillare/dj.web
+                {:git/sha "518b6fe21cf020af2cd21c27d2ac84707344c13c"}}
+   :main-opts ["-m" "dj.ai.tooling.chat"]}
+
+  :payload-api
   {:extra-paths ["dev"]
    :main-opts ["-m" "dj.ai.tooling.payload-api"]}
 

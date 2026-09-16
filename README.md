@@ -2,6 +2,8 @@
 
 Curated tooling patterns for Clojure agent harnesses.
 
+Author: Brent Millare
+
 > Status: experimental. Exact-search patching and whole-file snapshots
 > primitives are available for manual evaluation; their APIs may change as
 > usage evidence accumulates.
@@ -304,6 +306,23 @@ nix develop --command clojure -M:payload-api payload-api.edn task.txt
 See [the payload contract](doc/design/payload.md) for the pure API, configuration,
 reference escapes, limits, native transport probes, and observed model fidelity
 limits. XML transport and execution are deferred.
+
+### Tooling chat UI
+
+A minimal dj.web chat harness under `dev/` exercises ordinary chat, payload
+composition, and local API editing with expandable model/tool traces. Edits
+wait for explicit diff review and commit; payload text is never executed.
+
+```bash
+nix develop --command clojure -M:chat
+# Optional endpoint configuration and workspace:
+nix develop --command clojure -M:chat dev/chat.edn /path/to/workspace
+```
+
+Open **http://127.0.0.1:9091**. Defaults target `gemma-4-12b` at
+`http://127.0.0.1:8080/v1`. The conversation is shared across tabs and kept in
+memory. See [the harness design and walkthrough](doc/design/chat-harness.md)
+for modes, configuration, session boundaries, and verification.
 
 ### Progress graph builder
 
