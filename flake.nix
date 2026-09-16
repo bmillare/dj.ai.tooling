@@ -15,6 +15,7 @@
               pkgs.temurin-bin
               pkgs.clojure
               pkgs.babashka
+              pkgs.python3
             ];
           };
         });
