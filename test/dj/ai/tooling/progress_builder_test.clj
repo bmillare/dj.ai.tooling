@@ -336,6 +336,30 @@
     (is (str/includes? rendered "CHANGES | since 1 | cursor 2"))
     (is (not (str/includes? rendered (:id first-node))))))
 
+(deftest legacy-events-preserve-capture-order-and-projected-nodes
+  (builder/record! {:kind :know :body "Legacy root"})
+  (builder/record! {:kind :to-know :body "Legacy question" :spawned-by #{"K1"}})
+  (let [graph (:graph @builder/state)
+        projected (:nodes (progress/topology graph))]
+    @(recorder/patch! builder/state (recorder.patch/->Replace {:graph graph}))
+    (let [{:keys [events cursor]} (builder/changes-since)]
+      (is (= projected (mapv :node events)))
+      (is (= [1 2] (mapv :cursor events)))
+      (is (= [:legacy-capture :legacy-capture] (mapv :op events)))
+      (is (= 2 cursor))
+      (is (empty? (:events (builder/changes-since cursor)))))))
+
+(deftest builder-input-errors-have-machine-readable-reasons
+  (doseq [[reason operation]
+          [[:invalid-author #(builder/identify! {})]
+           [:unknown-view-token #(builder/app (post-request "/set-view" {"token" "unknown"} "{}"))]
+           [:unknown-panel #(builder/app (post-request "/set-panel" {"panel" "unknown"} "{}"))]
+           [:invalid-cursor #(builder/app (post-request "/set-changes-cursor" {} "{\"changesCursor\":-1}"))]]]
+    (let [data (try (operation) nil
+                    (catch clojure.lang.ExceptionInfo e (ex-data e)))]
+      (is (= {:type :invalid-builder-input :reason reason}
+             (select-keys data [:type :reason]))))))
+
 (deftest first-event-continues-after-a-legacy-graph-cursor
   (let [legacy-graph (-> (progress/empty-graph)
                          (progress/add-node {:id :k1 :kind :know :body "Old one"

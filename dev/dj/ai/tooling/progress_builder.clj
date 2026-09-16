@@ -63,7 +63,7 @@
   [author]
   (when-not (progress/valid-author? author)
     (throw (ex-info "Author must be {:actor <keyword>} with optional string :session."
-                    {:author author})))
+                    {:type :invalid-builder-input :reason :invalid-author :author author})))
   (reset! repl-author author))
 
 (defn- repl-author! []
@@ -108,12 +108,11 @@
    (let [{:keys [graph events event-cursor]} @state
          legacy? (nil? event-cursor)
          legacy (when (and legacy? (zero? cursor))
-                  (map-indexed (fn [index node-id]
+                  (map-indexed (fn [index node]
                                  {:cursor (inc index)
                                   :op :legacy-capture
-                                  :node (some #(when (= node-id (:id %)) %)
-                                              (:nodes (progress/topology graph)))})
-                               (:order graph)))]
+                                  :node node})
+                               (:nodes (progress/topology graph))))]
      {:since cursor
       :cursor (or event-cursor (count (:order graph)))
       :events (into (vec legacy) (filter #(> (:cursor %) cursor)) events)})))
@@ -124,7 +123,7 @@
   ([cursor]
    (let [{next-cursor :cursor events :events} (changes-since cursor)
          graph (:graph @state)
-         alias-for #(get-in (progress/aliases graph) [:id->alias %])]
+         alias-for (:id->alias (progress/aliases graph))]
      (str "CHANGES | since " cursor " | cursor " next-cursor
           (when (seq events)
             (str "\n\n"
@@ -333,42 +332,45 @@
     (some #(when (= node-id (:id %)) %) (:nodes (topology)))))
 
 (defn- import-one!
-  "Transacts one analyzed watson entry all-or-nothing. The dry run IS the
-  transaction: entry-tx folds inside the recorder's single-writer tx fn, so a
-  throw persists nothing and there is no validate/commit race. Idempotency is
-  checked in the same place against :imported-entries."
+  "Imports against the transaction's current graph. The committed event is
+  the receipt; an attempt id distinguishes this write from a concurrent
+  import of the same entry. Read the transaction result, not live state."
   [entry author]
-  (let [result (volatile! nil)]
-    (cond
-      ;; an already-imported id is settled — a later edit that mangles its
-      ;; block must not turn every future scan of the file into a failure
-      (contains? (:imported-entries @state) (:id entry))
-      (vreset! result {:status :skipped})
+  (let [entry-id (:id entry)
+        result
+        (cond
+          ;; An imported id stays settled even if a later edit mangles its block.
+          (contains? (:imported-entries @state) entry-id)
+          {:status :skipped}
 
-      (seq (:errors entry))
-      (vreset! result {:status :rejected :errors (:errors entry)})
+          (seq (:errors entry))
+          {:status :rejected :errors (:errors entry)}
 
-      :else
-      (try
-        (transact!
-         (fn [current]
-           (if (contains? (:imported-entries current) (:id entry))
-             (do (vreset! result {:status :skipped}) current)
-             (let [{:keys [graph node-ids resolved]}
-                   (imp/entry-tx (:graph current) entry {:author author})]
-               (vreset! result {:status :imported :node-ids node-ids
-                                :resolved resolved})
-               (-> current
-                   (assoc :graph graph)
-                   (update :imported-entries (fnil conj #{}) (:id entry))
-                   (author-event author :import {:node-ids node-ids
-                                                 :entry-id (:id entry)}))))))
-        (catch Exception e
-          (vreset! result {:status :rejected
-                           :errors [(merge {:error (.getMessage e)}
-                                           (some->> (ex-data e)
-                                                    (hash-map :data)))]}))))
-    (assoc @result :entry-id (:id entry))))
+          :else
+          (try
+            (let [attempt-id (random-uuid)
+                  committed
+                  (transact!
+                   (fn [current]
+                     (if (contains? (:imported-entries current) entry-id)
+                       current
+                       (let [{:keys [graph node-ids resolved]}
+                             (imp/entry-tx (:graph current) entry {:author author})]
+                         (-> current
+                             (assoc :graph graph)
+                             (update :imported-entries (fnil conj #{}) entry-id)
+                             (author-event author :import
+                                           {:node-ids node-ids :resolved resolved
+                                            :entry-id entry-id :attempt-id attempt-id}))))))
+                  receipt (:last-event committed)]
+              (if (= attempt-id (:attempt-id receipt))
+                (assoc (select-keys receipt [:node-ids :resolved]) :status :imported)
+                {:status :skipped}))
+            (catch Exception e
+              {:status :rejected
+               :errors [(cond-> {:error (ex-message e)}
+                          (ex-data e) (assoc :data (ex-data e)))]})))]
+    (assoc result :entry-id entry-id)))
 
 (defn import-text!
   "Scans text for watson entries (see dj.ai.tooling.progress-import) and
@@ -569,7 +571,9 @@
 (defn- selected-topology [graph filters]
   (progress/project-topology graph (selected-node-ids graph filters) {}))
 
-(defn- node-card [{:keys [graph alias-of filters editing]} node section-start? previous-id]
+(defn- node-card
+  [{:keys [graph alias-of filters editing pending-synthesis-ids]}
+   node section-start? previous-id]
   (let [node-id (:id node)
         distant-parents (remove #{previous-id} (:spawned-by node))
         draft (signal-name "draft" node-id)
@@ -583,7 +587,7 @@
         body-draft (signal-name "bodyDraft" node-id)
         resolve-existing (signal-name "resolveExisting" node-id)
         synth (signal-name "synth" node-id)
-        pending-synthesis? (progress/synthesis-pending? graph node-id)
+        pending-synthesis? (contains? pending-synthesis-ids node-id)
         canned-synthesis (str "Reviewed " (:alias node)
                               (when-let [targets (seq (keep alias-of
                                                            (:resolves node)))]
@@ -968,7 +972,8 @@
         nodes (progress/topology-layout topology)
         roots (set (:roots topology))
         alias-of (:id->alias (progress/aliases graph))
-        env {:graph graph :alias-of alias-of :filters filters :editing editing}
+        env {:graph graph :alias-of alias-of :filters filters :editing editing
+             :pending-synthesis-ids (into #{} (map :id) (:unsynthesized-dones frontier))}
         reference-editor? (or (= :root panel) editing)]
     [:main#app
      [:section.hero
@@ -1204,7 +1209,7 @@
   (when-let [text (present (some-> text str/trim))]
     (when-not (re-matches #"[a-z][a-z0-9-]*" text)
       (throw (ex-info "Layer names are single lowercase words such as design or north-star."
-                      {:layer text})))
+                      {:type :invalid-builder-input :reason :invalid-layer :layer text})))
     (keyword text)))
 
 (defn- node-value [kind body]
@@ -1317,7 +1322,9 @@
          (progress/resolve-id graph (subs token (count "resolution:"))))
 
     :else
-    (throw (ex-info "Unknown graph view token." {:token token}))))
+    (throw (ex-info "Unknown graph view token."
+                    {:type :invalid-builder-input :reason :unknown-view-token
+                     :token token}))))
 
 (defn- update-ui! [f]
   (swap! ui-state f)
@@ -1358,7 +1365,9 @@
 (defn- set-panel! [request]
   (let [panel (some-> (get-in request [:query-params "panel"]) keyword)]
     (when-not (or (nil? panel) (#{:model :changes :root :help} panel))
-      (throw (ex-info "Unknown builder panel." {:panel panel})))
+      (throw (ex-info "Unknown builder panel."
+                      {:type :invalid-builder-input :reason :unknown-panel
+                       :panel panel})))
     (update-ui! #(assoc % :panel (when-not (= panel (:panel %)) panel)))))
 
 (defn- set-editor! [request]
@@ -1371,7 +1380,7 @@
         cursor (if (or (nil? raw) (= "" raw)) 0 (parse-long (str raw)))]
     (when-not (and (integer? cursor) (not (neg? cursor)))
       (throw (ex-info "Changes cursor must be a non-negative integer."
-                      {:cursor raw})))
+                      {:type :invalid-builder-input :reason :invalid-cursor :cursor raw})))
     (update-ui! #(assoc % :changes-cursor cursor))))
 
 (defn app [request]

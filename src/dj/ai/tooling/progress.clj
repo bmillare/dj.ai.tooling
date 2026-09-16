@@ -3,7 +3,10 @@
 
   Spawn edges preserve why a node exists; resolution edges record an explicit
   outcome. Persistence, clocks, identifiers, and ranking are left to callers;
-  a compact topology renderer is provided for model-facing inspection."
+  a compact topology renderer is provided for model-facing inspection.
+
+  Validation errors carry :type :invalid-progress-graph, a machine-readable
+  :reason keyword, and context identifying the affected nodes or input."
   (:refer-clojure :exclude [ancestors resolve])
   (:require [clojure.string :as str]))
 
@@ -39,12 +42,12 @@
 (defn node [graph node-id]
   (get-in graph [:nodes node-id]))
 
-(defn- fail [message data]
-  (throw (ex-info message (assoc data :type :invalid-progress-graph))))
+(defn- fail [reason message data]
+  (throw (ex-info message (assoc data :type :invalid-progress-graph :reason reason))))
 
 (defn- require-node [graph node-id role]
   (or (node graph node-id)
-      (fail "Progress node does not exist." {:node-id node-id :role role})))
+      (fail :node-not-found "Progress node does not exist." {:node-id node-id :role role})))
 
 (defn- normalize-node [value]
   (-> value
@@ -60,11 +63,11 @@
 (defn- validate-resolution [graph resolver target-id]
   (let [target (require-node graph target-id :resolution-target)]
     (when-not (valid-resolution? resolver target)
-      (fail "Resolution must be Done -> To Do or Know -> To Know."
+      (fail :invalid-resolution-kinds "Resolution must be Done -> To Do or Know -> To Know."
             {:resolver-id (:id resolver) :resolver-kind (:kind resolver)
              :target-id target-id :target-kind (:kind target)}))
     (when (= :cancelled (:status target))
-      (fail "Cancelled nodes must be reopened before they can be resolved."
+      (fail :cancelled-resolution-target "Cancelled nodes must be reopened before they can be resolved."
             {:resolver-id (:id resolver) :target-id target-id
              :target-status (:status target)}))))
 
@@ -78,7 +81,7 @@
 
 (defn- validate-author [node-id author]
   (when-not (valid-author? author)
-    (fail ":author must be a map of a keyword :actor and optional string :session."
+    (fail :invalid-author ":author must be a map of a keyword :actor and optional string :session."
           {:node-id node-id :author author})))
 
 (defn valid-layer?
@@ -90,23 +93,23 @@
 
 (defn- validate-layer [node-id layer]
   (when-not (valid-layer? layer)
-    (fail ":layer must be a bare keyword such as :design."
+    (fail :invalid-layer ":layer must be a bare keyword such as :design."
           {:node-id node-id :layer layer})))
 
 (defn- validate-new-node [graph value]
   (let [{:keys [id kind body status spawned-by resolves pinned-under
                 created-at author layer]} value]
-    (when (nil? id) (fail "Progress node requires :id." {:node value}))
+    (when (nil? id) (fail :missing-id "Progress node requires :id." {:node value}))
     (when (node graph id)
-      (fail "Progress node id already exists." {:node-id id}))
+      (fail :duplicate-id "Progress node id already exists." {:node-id id}))
     (when-not (node-kinds kind)
-      (fail "Progress node has an unknown :kind." {:node-id id :kind kind}))
+      (fail :invalid-kind "Progress node has an unknown :kind." {:node-id id :kind kind}))
     (when-not (and (string? body) (not (str/blank? body)))
-      (fail "Progress node requires a non-blank :body." {:node-id id}))
+      (fail :invalid-body "Progress node requires a non-blank :body." {:node-id id}))
     (when-not (statuses status)
-      (fail "Progress node has an unknown :status." {:node-id id :status status}))
+      (fail :invalid-status "Progress node has an unknown :status." {:node-id id :status status}))
     (when-not (inst? created-at)
-      (fail "Progress node requires an instant :created-at."
+      (fail :invalid-created-at "Progress node requires an instant :created-at."
             {:node-id id :created-at created-at}))
     (doseq [parent-id spawned-by]
       (require-node graph parent-id :spawn-parent))
@@ -114,7 +117,7 @@
       (validate-resolution graph value target-id))
     (when pinned-under
       (when-not (= :know kind)
-        (fail "Only Know nodes may be standing context."
+        (fail :invalid-standing-context-kind "Only Know nodes may be standing context."
               {:node-id id :kind kind}))
       (require-node graph pinned-under :pinned-under))
     (when (contains? value :author)
@@ -151,10 +154,10 @@
   [graph to-do-id done]
   (let [target (require-node graph to-do-id :completion-target)]
     (when-not (= :to-do (:kind target))
-      (fail "Only a To Do can be completed with a Done."
+      (fail :invalid-completion-kind "Only a To Do can be completed with a Done."
             {:node-id to-do-id :kind (:kind target)}))
     (when-not (#{:open :blocked} (:status target))
-      (fail "Only an open or blocked To Do can be completed."
+      (fail :invalid-completion-status "Only an open or blocked To Do can be completed."
             {:node-id to-do-id :status (:status target)}))
     (add-node graph (-> done
                         (assoc :kind :done
@@ -188,7 +191,7 @@
   ;; intentionally preserves the resolver's historical :resolves edge.
   (require-node graph node-id :status-target)
   (when-not (statuses status)
-    (fail "Progress node has an unknown :status." {:node-id node-id :status status}))
+    (fail :invalid-status "Progress node has an unknown :status." {:node-id node-id :status status}))
   (assoc-in graph [:nodes node-id :status] status))
 
 (defn edit-body
@@ -196,7 +199,7 @@
   [graph node-id body]
   (require-node graph node-id :edit-target)
   (when-not (and (string? body) (not (str/blank? body)))
-    (fail "Progress node requires a non-blank :body."
+    (fail :invalid-body "Progress node requires a non-blank :body."
           {:node-id node-id :body body}))
   (assoc-in graph [:nodes node-id :body] body))
 
@@ -254,12 +257,12 @@
     (doseq [parent-id parents]
       (require-node graph parent-id :spawn-parent)
       (when (= parent-id child-id)
-        (fail "A node cannot spawn itself." {:node-id child-id}))
+        (fail :self-spawn "A node cannot spawn itself." {:node-id child-id}))
       (when (contains? (:spawned-by child) parent-id)
-        (fail "Spawn edge already exists."
+        (fail :duplicate-spawn-edge "Spawn edge already exists."
               {:child-id child-id :parent-id parent-id}))
       (when (some #(= child-id (:id %)) (ancestors graph parent-id))
-        (fail "Spawn edge would create a cycle."
+        (fail :spawn-cycle "Spawn edge would create a cycle."
               {:child-id child-id :parent-id parent-id})))
     (reduce (fn [g parent-id]
               (-> g
@@ -277,7 +280,7 @@
     (doseq [parent-id parents]
       (require-node graph parent-id :spawn-parent)
       (when-not (contains? (:spawned-by child) parent-id)
-        (fail "Spawn edge does not exist."
+        (fail :spawn-edge-not-found "Spawn edge does not exist."
               {:child-id child-id :parent-id parent-id})))
     (reduce (fn [g parent-id]
               (-> g
@@ -295,17 +298,17 @@
   [graph node-id]
   (let [value (require-node graph node-id :removal-target)]
     (when-let [child-ids (seq (get-in graph [:spawn-children node-id]))]
-      (fail "Cannot remove a node with spawn children."
+      (fail :has-spawn-children "Cannot remove a node with spawn children."
             {:node-id node-id :child-ids (vec child-ids)}))
     (when (seq (:resolves value))
-      (fail "Cannot remove a node that resolves others."
+      (fail :has-resolution-targets "Cannot remove a node that resolves others."
             {:node-id node-id :resolves (:resolves value)}))
     (when-let [resolver-ids (seq (get-in graph [:resolved-by node-id]))]
-      (fail "Cannot remove a node that has been resolved."
+      (fail :has-resolvers "Cannot remove a node that has been resolved."
             {:node-id node-id :resolver-ids (vec resolver-ids)}))
     (when-let [pinned-id (some #(when (= node-id (:pinned-under (node graph %))) %)
                                (:order graph))]
-      (fail "Cannot remove a node that anchors standing context."
+      (fail :anchors-standing-context "Cannot remove a node that anchors standing context."
             {:node-id node-id :pinned-node-id pinned-id}))
     (-> (reduce (fn [g parent-id]
                   (update-in g [:spawn-children parent-id]
@@ -483,7 +486,7 @@
   [graph id-or-alias]
   (or (when (node graph id-or-alias) id-or-alias)
       (get-in (aliases graph) [:alias->id id-or-alias])
-      (fail "Progress node id or alias does not exist."
+      (fail :reference-not-found "Progress node id or alias does not exist."
             {:node-id-or-alias id-or-alias})))
 
 (def ^:private neighbor-preview-chars 160)
@@ -561,7 +564,7 @@
   ([graph id-or-alias {:keys [max-nodes max-body-chars]
                        :or {max-nodes 64 max-body-chars 2000}}]
    (when-not (and (pos-int? max-nodes) (pos-int? max-body-chars))
-     (fail "Ancestry view bounds must be positive integers."
+     (fail :invalid-bounds "Ancestry view bounds must be positive integers."
            {:max-nodes max-nodes :max-body-chars max-body-chars}))
    (let [target-id (resolve-id graph id-or-alias)
          ancestor-ids (nearest-ancestor-ids graph target-id)
@@ -646,7 +649,7 @@
   ([graph] (current-work graph {}))
   ([graph {:keys [author]}]
    (when (and author (not (valid-author? author)))
-     (fail ":author must be a map of a keyword :actor and optional string :session."
+     (fail :invalid-author ":author must be a map of a keyword :actor and optional string :session."
            {:author author}))
    (let [matches-author? (fn [value]
                            (or (nil? author)

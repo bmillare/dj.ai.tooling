@@ -143,3 +143,51 @@ prose after is ignored too")
     (is (str/includes? (builder/import-report-view rejected) "REJECTED"))
     (is (str/includes? (builder/import-report-view first-run)
                        "imported 1"))))
+
+(deftest concurrent-imports-return-one-committed-receipt
+  (let [tx! recorder/tx!
+        arrived (atom 0)
+        ready (promise)]
+    ;; Both callers pass the initial idempotency check before either commits.
+    (with-redefs [recorder/tx! (fn [db f]
+                                (when (= 2 (swap! arrived inc))
+                                  (deliver ready true))
+                                (when-not (deref ready 5000 false)
+                                  (throw (ex-info "Import rendezvous timed out" {})))
+                                (tx! db f))]
+      (let [a (future (builder/import-text! entry-text))
+            b (future (builder/import-text! entry-text))
+            results (mapv #(first (:results (deref % 10000 {}))) [a b])
+            receipt (first (filter #(= :imported (:status %)) results))
+            event (:last-event @builder/state)]
+        (is (= {:imported 1 :skipped 1} (frequencies (map :status results))))
+        (is (= (:node-ids receipt) (:node-ids event)))
+        (is (= (:resolved receipt) (:resolved event)))
+        (is (= 2 (count (get-in @builder/state [:graph :nodes]))))
+        (is (= 1 (count (:events @builder/state))))))))
+
+(deftest import-receipt-comes-from-its-commit-not-later-live-state
+  (let [tx! recorder/tx!]
+    (with-redefs [recorder/tx!
+                  (fn [db f]
+                    (let [committed @(tx! db f)]
+                      @(tx! db #(recorder.patch/->Replace
+                                 (assoc % :last-event {:op :later-write})))
+                      (delay committed)))]
+      (let [result (first (:results (builder/import-text! entry-text)))]
+        (is (= :imported (:status result)))
+        (is (= (get-in @builder/state [:graph :order]) (:node-ids result)))
+        (is (= {:op :later-write} (:last-event @builder/state)))))))
+
+(deftest failed-persistence-does-not-return-an-import-receipt
+  (let [before @builder/state]
+    (with-redefs [recorder/tx!
+                  (fn [db f]
+                    ;; Authoring succeeds, but durability fails.
+                    (f @db)
+                    (delay (throw (ex-info "Persistence failed" {:type :test-io-error}))))]
+      (let [result (first (:results (builder/import-text! entry-text)))]
+        (is (= :rejected (:status result)))
+        (is (= :test-io-error (get-in result [:errors 0 :data :type])))
+        (is (not (contains? result :node-ids)))
+        (is (= before @builder/state))))))

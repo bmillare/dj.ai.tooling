@@ -328,7 +328,9 @@
    {default-author :author :keys [uuid-fn now]
     :or {uuid-fn (fn [] (str (random-uuid))) now (java.util.Date.)}}]
   (when (seq (:errors entry))
-    (throw (ex-info "entry has analysis errors" {:errors (:errors entry)})))
+    (throw (ex-info "entry has analysis errors"
+                    {:type :invalid-progress-import :reason :analysis-errors
+                     :errors (:errors entry)})))
   (let [entry-author (or author default-author)
         tempids (into {} (map (fn [{:keys [id]}] [id (uuid-fn)])) nodes)]
     (reduce

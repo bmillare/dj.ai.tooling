@@ -24,6 +24,35 @@
       (progress/resolve :learned [:question-a])
       (add :done-b :done "A result arrived but was not reviewed." [:root] 7)))
 
+(deftest validation-errors-have-machine-readable-reasons
+  (let [graph (example-graph)]
+    (doseq [[reason operation]
+            [[:duplicate-id #(add graph :root :know "Duplicate" [] 0)]
+             [:node-not-found #(progress/edit-body graph :missing "Body")]
+             [:reference-not-found #(progress/resolve-id graph "K999")]
+             [:invalid-body #(progress/edit-body graph :root " ")]
+             [:invalid-status #(progress/set-status graph :root :unknown)]
+             [:invalid-author #(progress/set-author graph :root {})]
+             [:invalid-layer #(progress/set-layer graph :root :nested/layer)]
+             [:invalid-completion-kind #(progress/complete graph :root {})]
+             [:invalid-completion-status
+              #(progress/complete (progress/set-status graph :todo-a :closed) :todo-a {})]
+             [:invalid-resolution-kinds #(progress/resolve graph :done-a [:root])]
+             [:cancelled-resolution-target
+              #(progress/resolve (progress/set-status graph :todo-a :cancelled)
+                                 :done-a [:todo-a])]
+             [:self-spawn #(progress/link graph :root [:root])]
+             [:duplicate-spawn-edge #(progress/link graph :question-a [:root])]
+             [:spawn-cycle #(progress/link graph :root [:question-a])]
+             [:spawn-edge-not-found #(progress/unlink graph :root [:question-a])]
+             [:has-spawn-children #(progress/remove-node graph :root)]
+             [:invalid-bounds #(progress/ancestry-context graph :root {:max-nodes 0})]]]
+      (let [data (try (operation) nil
+                      (catch clojure.lang.ExceptionInfo e (ex-data e)))]
+        (is (= {:type :invalid-progress-graph :reason reason}
+               (select-keys data [:type :reason]))
+            (str reason))))))
+
 (deftest construction-and-resolution
   (let [graph (-> (progress/empty-graph)
                   (add :q :to-know "Question?" [] 0)

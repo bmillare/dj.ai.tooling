@@ -14,6 +14,12 @@ tracking understanding and activity as a graph. Its four node kinds are
 resolution edges explicitly close a question or action without erasing its
 history.
 
+Progress validation throws `ExceptionInfo` with
+`{:type :invalid-progress-graph :reason <keyword> ...}`. Branch on `:reason`
+instead of parsing the message: for example, `:duplicate-id`, `:node-not-found`,
+`:invalid-completion-status`, or `:spawn-cycle`. Additional fields identify
+the affected nodes, references, or bounds; messages are for display.
+
 ```clojure
 (require '[dj.ai.tooling.progress :as progress])
 
@@ -292,6 +298,12 @@ The pure `progress/topology` query projects capture-ordered nodes with direct
 `:spawn-children` and `:resolved-by` edges, plus roots and the derived frontier.
 Graph state survives process restarts in the append-only `.progress-graph.edn`
 log. Set `PROGRESS_GRAPH_PATH` to use another location.
+
+Each successful `import-text!` entry records an import event containing its
+node IDs, resolved external references, and a unique attempt ID. The caller
+reads its receipt from the committed transaction result, so concurrent imports
+of the same entry return one `:imported` result and a `:skipped` result for
+duplicates. Failed transactions return `:rejected` without an import receipt.
 
 The topology is always rendered in its condensed form. Clicking a node's text
 toggles its action panel; explicit `Edit text` and `Add node` buttons also open
