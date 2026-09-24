@@ -28,7 +28,7 @@
 (def tool-definitions
   [(tool "define_payload" "Retain one named text template. Nothing is executed. IDs are unique; forward references are allowed."
          ["id" "lang" "body"])
-   (tool "resolve_payload" "Resolve the root text template using all retained definitions. Each reference becomes a string literal for this block's language. Returns final text and trace; never executes."
+   (tool "resolve_payload" "Resolve the top-level text template using all retained definitions. Each reference becomes a string literal for this block's language. Returns final text and trace; never executes."
          ["lang" "body"])])
 
 (defn initial-state
@@ -48,8 +48,9 @@
 
 (defn accept-response
   "Pure atomic transition. On rejection, :state is exactly the previous state.
-  Definitions in a response are collected before its optional root is resolved,
-  permitting forward references regardless of call order. One root per session.
+  Definitions in a response are collected before its optional top-level body is
+  resolved, permitting forward references regardless of call order. One
+  top-level body per session.
   Malformed/invalid responses stop automation; no partial definitions are kept."
   [state response]
   (let [wire (calls/decode-response response)
@@ -62,11 +63,11 @@
       (= :answer (:status wire)) (assoc wire :state (assoc state :status :answer))
       :else
       (let [errors (into [] (keep validate-call) (:calls wire))
-            roots (filterv #(= "resolve_payload" (:name %)) (:calls wire))]
+            top-levels (filterv #(= "resolve_payload" (:name %)) (:calls wire))]
         (cond
           (seq errors) (rejected errors)
-          (> (count roots) 1) (rejected [{:type :invalid-payload :reason :multiple-roots
-                                         :message "Call resolve_payload only once."}])
+          (> (count top-levels) 1) (rejected [{:type :invalid-payload :reason :multiple-top-levels
+                                               :message "Call resolve_payload only once."}])
           :else
           (try
             (let [blocks (into (:blocks state)
@@ -75,11 +76,11 @@
                                             {:id (get arguments "id") :lang (languages (get arguments "lang"))
                                              :body (get arguments "body")}))) (:calls wire))
                   _ (payload/validate-blocks blocks (:limits state))
-                  root-args (:arguments (first roots))
-                  resolved (when root-args
+                  top-level-args (:arguments (first top-levels))
+                  resolved (when top-level-args
                              (payload/resolve {:blocks blocks
-                                               :root {:lang (languages (get root-args "lang"))
-                                                      :body (get root-args "body")}}
+                                               :top-level {:lang (languages (get top-level-args "lang"))
+                                                           :body (get top-level-args "body")}}
                                               (:limits state)))
                   next-state (cond-> (assoc state :blocks blocks)
                                resolved (assoc :status :resolved :result resolved))]
@@ -89,7 +90,7 @@
 
 (defn tool-results
   "Correlates results with native call IDs. Final text is returned only to the
-  root call; definition acknowledgments don't echo bodies. Rejections are atomic."
+  top-level call; definition acknowledgments don't echo bodies. Rejections are atomic."
   [{:keys [status calls state errors]}]
   (mapv (fn [{:keys [call-id name arguments]}]
           {"role" "tool" "tool_call_id" call-id

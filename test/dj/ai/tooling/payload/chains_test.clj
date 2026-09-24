@@ -76,7 +76,7 @@
     (testing (pr-str message)
       (check-output "bash"
                     {:blocks (python-json-blocks message)
-                     :root {:lang :bash :body "exec python3 -c {{script}}"}}
+                     :top-level {:lang :bash :body "exec python3 -c {{script}}"}}
                     message))))
 
 (deftest posix-sh-to-bash-to-python-to-json
@@ -86,7 +86,7 @@
       (check-output "sh"
                     {:blocks (conj (python-json-blocks message)
                                    (block "command" :bash "exec python3 -c {{script}}"))
-                     :root {:lang :sh :body "exec bash -c {{command}}"}}
+                     :top-level {:lang :sh :body "exec bash -c {{command}}"}}
                     message))))
 
 (defn- clojure-edn-doc [message]
@@ -98,8 +98,8 @@
             (literal-block "message" message)
             (literal-block "java" (str (System/getProperty "java.home") "/bin/java"))
             (literal-block "classpath" (System/getProperty "java.class.path"))]
-   :root {:lang :bash
-          :body "exec {{java}} -Dfile.encoding=UTF-8 -cp {{classpath}} clojure.main -e {{script}}"}})
+   :top-level {:lang :bash
+               :body "exec {{java}} -Dfile.encoding=UTF-8 -cp {{classpath}} clojure.main -e {{script}}"}})
 
 (deftest bash-to-clojure-to-edn
   (doseq [message messages]
@@ -114,5 +114,5 @@
                    (catch clojure.lang.ExceptionInfo e (ex-data e)))]
     (is (= :unrepresentable-character (:reason error)))
     (is (= :resolve (:stage error)))
-    (is (= :root (:block error)))
+    (is (= :top-level (:block error)))
     (is (= "script" (:ref error)))))

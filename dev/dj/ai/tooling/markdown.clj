@@ -1,5 +1,5 @@
 (ns dj.ai.tooling.markdown
-  "Server-side Markdown -> HTML for node bodies in the progress builder.
+  "Server-side Markdown -> HTML for progress node bodies and chat responses.
 
   Slimmed from dj.monitor.be.web.markdown (the reference implementation).
   Bodies are short, often LLM-generated notes, so this keeps the two safety

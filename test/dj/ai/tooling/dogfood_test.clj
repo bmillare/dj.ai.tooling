@@ -8,23 +8,23 @@
   (Files/createTempDirectory "dj-ai-tooling-dogfood-"
                              (make-array FileAttribute 0)))
 
-(deftest exact-paths-normalize-against-root
-  (let [root (temp-dir)
-        inside (.resolve root "folder/file with spaces.txt")]
+(deftest exact-paths-normalize-against-workspace
+  (let [workspace (temp-dir)
+        inside (.resolve workspace "folder/file with spaces.txt")]
     (is (= "folder/file with spaces.txt"
-           (dogfood/normalize-path root (str inside))))
+           (dogfood/normalize-path workspace (str inside))))
     (is (= "folder/file with spaces.txt"
-           (dogfood/normalize-path root "folder/file with spaces.txt")))
+           (dogfood/normalize-path workspace "folder/file with spaces.txt")))
     (is (= "folder/file with spaces.txt"
-           (dogfood/normalize-path root (str "\"" inside "\""))))))
+           (dogfood/normalize-path workspace (str "\"" inside "\""))))))
 
-(deftest paths-outside-root-are-rejected-immediately
-  (let [root (temp-dir)
+(deftest paths-outside-workspace-are-rejected-immediately
+  (let [workspace (temp-dir)
         outside (Files/createTempFile "outside-dogfood-" ".txt"
                                       (make-array FileAttribute 0))]
-    (is (= :outside-root
+    (is (= :outside-workspace
            (try
-             (dogfood/normalize-path root (str outside))
+             (dogfood/normalize-path workspace (str outside))
              nil
              (catch clojure.lang.ExceptionInfo error
                (:reason (ex-data error))))))))
@@ -44,18 +44,18 @@
     (is (nil? (:changeset removed)))))
 
 (deftest snapshot-errors-are-preserved
-  (let [root (temp-dir)
+  (let [workspace (temp-dir)
         result (dogfood/snapshot-result
-                (dogfood/initial-state root ["missing.txt"]))]
+                (dogfood/initial-state workspace ["missing.txt"]))]
     (is (= :rejected (:status result)))
     (is (= :file-not-found (-> result :errors first :type)))))
 
 (deftest prompt-result-renders-file-snapshots
-  (let [root (temp-dir)
-        file (.resolve root "example.txt")]
+  (let [workspace (temp-dir)
+        file (.resolve workspace "example.txt")]
     (Files/writeString file "hello" (make-array java.nio.file.OpenOption 0))
     (let [result (dogfood/prompt-result
-                  (dogfood/initial-state root ["example.txt"]))]
+                  (dogfood/initial-state workspace ["example.txt"]))]
       (is (= :ready (:status result)))
       (is (= 1 (:file-count result)))
       (is (= 5 (:content-bytes result)))
@@ -70,9 +70,9 @@
     (is (= [] (:paths removed)))))
 
 (deftest stage-stores-the-exact-changeset-that-commit-consumes
-  (let [root (temp-dir)
-        target (.resolve root "target.txt")
-        response (.resolve root "response.txt")]
+  (let [workspace (temp-dir)
+        target (.resolve workspace "target.txt")
+        response (.resolve workspace "response.txt")]
     (Files/writeString target "before\n" (make-array java.nio.file.OpenOption 0))
     (Files/writeString
      response
@@ -81,7 +81,7 @@
           "<replace>\nafter\n</replace>\n"
           "</edit>\n")
      (make-array java.nio.file.OpenOption 0))
-    (let [state (dogfood/initial-state root ["target.txt"])
+    (let [state (dogfood/initial-state workspace ["target.txt"])
           staged (dogfood/execute-command state (str "stage " response))]
       (is (= :ready (-> staged :changeset :status)))
       (is (= "before\n" (Files/readString target)))
@@ -90,9 +90,9 @@
         (is (= "after\n" (Files/readString target)))))))
 
 (deftest stage-uses-the-last-prompt-snapshots-as-basis
-  (let [root (temp-dir)
-        target (.resolve root "target.txt")
-        response (.resolve root "response.txt")]
+  (let [workspace (temp-dir)
+        target (.resolve workspace "target.txt")
+        response (.resolve workspace "response.txt")]
     (Files/writeString target "v1\n" (make-array java.nio.file.OpenOption 0))
     (Files/writeString
      response
@@ -101,7 +101,7 @@
           "<replace>\nv2\n</replace>\n"
           "</edit>\n")
      (make-array java.nio.file.OpenOption 0))
-    (let [state (dogfood/initial-state root ["target.txt"])
+    (let [state (dogfood/initial-state workspace ["target.txt"])
           snapshotted (dogfood/snapshot-result state)
           state (assoc state :snapshots (:snapshots snapshotted))]
       ;; the world drifts after the model saw its snapshot
@@ -116,9 +116,9 @@
           (is (= "drifted\n" (Files/readString target))))))))
 
 (deftest stage-counts-content-validation-rejections
-  (let [root (temp-dir)
-        target (.resolve root "t.clj")
-        response (.resolve root "response.txt")]
+  (let [workspace (temp-dir)
+        target (.resolve workspace "t.clj")
+        response (.resolve workspace "response.txt")]
     (Files/writeString target "(ok)\n" (make-array java.nio.file.OpenOption 0))
     (Files/writeString
      response
@@ -127,24 +127,24 @@
           "<replace>\n(ok\n</replace>\n"
           "</edit>\n")
      (make-array java.nio.file.OpenOption 0))
-    (let [state (dogfood/initial-state root [])
+    (let [state (dogfood/initial-state workspace [])
           staged (dogfood/execute-command state (str "stage " response))]
       (is (nil? (:changeset staged)))
       (is (= 1 (:validation-rejections staged)))
       (is (= "(ok)\n" (Files/readString target))))))
 
 (deftest filesystem-find-and-take-are-git-independent
-  (let [root (temp-dir)]
-    (Files/createDirectories (.resolve root "notes")
+  (let [workspace (temp-dir)]
+    (Files/createDirectories (.resolve workspace "notes")
                              (make-array FileAttribute 0))
-    (Files/writeString (.resolve root "dan_course.org") "x"
+    (Files/writeString (.resolve workspace "dan_course.org") "x"
                        (make-array java.nio.file.OpenOption 0))
-    (Files/writeString (.resolve root "notes/dan_creativity.org") "x"
+    (Files/writeString (.resolve workspace "notes/dan_creativity.org") "x"
                        (make-array java.nio.file.OpenOption 0))
-    (Files/writeString (.resolve root "notes/other.org") "x"
+    (Files/writeString (.resolve workspace "notes/other.org") "x"
                        (make-array java.nio.file.OpenOption 0))
-    (let [result (dogfood/find-paths root ["DAN" "org"])
-          state (assoc (dogfood/initial-state root [])
+    (let [result (dogfood/find-paths workspace ["DAN" "org"])
+          state (assoc (dogfood/initial-state workspace [])
                        :candidates (:paths result))
           selected (dogfood/take-candidates state [1 0])]
       (is (= ["dan_course.org" "notes/dan_creativity.org"] (:paths result)))
@@ -152,14 +152,14 @@
              (:paths selected))))))
 
 (deftest empty-find-matches-all-files
-  (let [root (temp-dir)]
-    (Files/createDirectory (.resolve root ".cpcache")
+  (let [workspace (temp-dir)]
+    (Files/createDirectory (.resolve workspace ".cpcache")
                            (make-array FileAttribute 0))
-    (Files/writeString (.resolve root "b.txt") "b"
+    (Files/writeString (.resolve workspace "b.txt") "b"
                        (make-array java.nio.file.OpenOption 0))
-    (Files/writeString (.resolve root "a.txt") "a"
+    (Files/writeString (.resolve workspace "a.txt") "a"
                        (make-array java.nio.file.OpenOption 0))
-    (Files/writeString (.resolve root ".cpcache/ignored") "cache"
+    (Files/writeString (.resolve workspace ".cpcache/ignored") "cache"
                        (make-array java.nio.file.OpenOption 0))
     (is (= ["a.txt" "b.txt"]
-           (:paths (dogfood/find-paths root []))))))
+           (:paths (dogfood/find-paths workspace []))))))

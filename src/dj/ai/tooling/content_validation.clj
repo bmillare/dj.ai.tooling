@@ -1,4 +1,4 @@
-(ns dj.ai.tooling.validate
+(ns dj.ai.tooling.content-validation
   "Pure content validators.
 
   A validator is a function from file content to a vector of error maps,

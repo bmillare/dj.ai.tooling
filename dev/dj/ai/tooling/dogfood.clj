@@ -27,26 +27,26 @@
     value))
 
 (defn normalize-path
-  "Normalizes an exact relative or absolute input path beneath root."
-  [root input]
-  (let [^Path root (path/to-root root)
+  "Normalizes an exact relative or absolute input path beneath the workspace."
+  [workspace input]
+  (let [^Path workspace (path/absolute workspace)
         input (-> input str/trim remove-outer-quotes)]
     (when (str/blank? input)
       (throw (ex-info "Path is empty" {:type :invalid-path :reason :blank})))
     (let [path (Paths/get input (make-array String 0))
           target (if (.isAbsolute path)
                    (.normalize path)
-                   (.normalize (.resolve root path)))]
-      (when-not (.startsWith target root)
-        (throw (ex-info "Path is outside the root"
-                        {:type :invalid-path :reason :outside-root
-                         :root (str root) :path input})))
-      (str (.relativize root target)))))
+                   (.normalize (.resolve workspace path)))]
+      (when-not (path/under? target workspace)
+        (throw (ex-info "Path is outside the workspace"
+                        {:type :invalid-path :reason :outside-workspace
+                         :workspace (str workspace) :path input})))
+      (str (.relativize workspace target)))))
 
-(defn initial-state [root paths]
-  (let [root (path/to-root root)]
-    {:root root
-     :paths (vec (distinct (map #(normalize-path root %) paths)))
+(defn initial-state [workspace paths]
+  (let [workspace (path/absolute workspace)]
+    {:workspace workspace
+     :paths (vec (distinct (map #(normalize-path workspace %) paths)))
      :candidates []
      :limits default-limits
      :snapshots nil
@@ -54,7 +54,7 @@
      :validation-rejections 0}))
 
 (defn add-path [state path]
-  (let [path (normalize-path (:root state) path)]
+  (let [path (normalize-path (:workspace state) path)]
     (cond-> (assoc state :changeset nil)
       (not (some #{path} (:paths state))) (update :paths conj path))))
 
@@ -72,17 +72,17 @@
 (defn find-paths
   "Finds cwd-relative regular files containing every case-insensitive term.
   Traversal and returned candidates are bounded for interactive use."
-  [root terms]
-  (let [^Path root (path/to-root root)
+  [workspace terms]
+  (let [^Path workspace (path/absolute workspace)
         terms (mapv str/lower-case terms)
         scanned (atom 0)
         matches (atom [])
         scan-limited? (atom false)]
     (Files/walkFileTree
-     root
+     workspace
      (proxy [SimpleFileVisitor] []
        (preVisitDirectory [^Path directory ^BasicFileAttributes _]
-         (if (and (not= root directory)
+         (if (and (not= workspace directory)
                   (skipped-directory-names (str (.getFileName directory))))
            FileVisitResult/SKIP_SUBTREE
            FileVisitResult/CONTINUE))
@@ -91,7 +91,7 @@
            (do (reset! scan-limited? true) FileVisitResult/TERMINATE)
            (do
              (swap! scanned inc)
-             (let [relative (str (.relativize root file))
+             (let [relative (str (.relativize workspace file))
                    candidate (str/lower-case relative)]
                (when (and (.isRegularFile attributes)
                           (every? #(str/includes? candidate %) terms))
@@ -145,8 +145,8 @@
       out
       (throw (ex-info "Clipboard paste failed" {:exit exit :error err})))))
 
-(defn snapshot-result [{:keys [root paths limits]}]
-  (observe/snapshot root
+(defn snapshot-result [{:keys [workspace paths limits]}]
+  (observe/snapshot workspace
                     (mapv #(hash-map :scheme :file :path %) paths)
                     limits))
 
@@ -173,8 +173,8 @@
   [state argument]
   (let [patches (edit/parse (response-text argument))]
     (if-let [snapshots (:snapshots state)]
-      (edit/stage (:root state) patches snapshots)
-      (edit/stage (:root state) patches))))
+      (edit/stage (:workspace state) patches snapshots)
+      (edit/stage (:workspace state) patches))))
 
 (defn- temp-file [prefix content]
   (let [path (Files/createTempFile prefix ".txt"
@@ -231,9 +231,9 @@
              (str scanned " files scanned,")
              (str (count paths) " candidates shown."))))
 
-(defn- print-status! [{:keys [root paths limits snapshots changeset]
+(defn- print-status! [{:keys [workspace paths limits snapshots changeset]
                        :as state}]
-  (println "Root:" (str root))
+  (println "Workspace:" (str workspace))
   (println "Context:" (count paths) (if (= 1 (count paths)) "file" "files"))
   (println "Limits:" (pr-str limits))
   (println "Basis:"
@@ -257,9 +257,9 @@
 (defn- print-help! []
   (println
    (str "Commands:\n"
-        "  find [TERM...]    find files below root; empty matches all\n"
+        "  find [TERM...]    find files in the workspace; empty matches all\n"
         "  take cID...       add candidate files found by `find`\n"
-        "  add PATH          add one exact path (relative or inside root)\n"
+        "  add PATH          add one exact path (relative or inside the workspace)\n"
         "  list              list context files\n"
         "  remove fID...     remove context files by displayed ID\n"
         "  clear             clear context files\n"
@@ -268,7 +268,7 @@
         "                    (against the last prompt's snapshots when taken)\n"
         "  review            show the staged changeset diff again\n"
         "  commit            commit the reviewed changeset if its basis is current\n"
-        "  status            show root, limits, and staged work\n"
+        "  status            show workspace, limits, and staged work\n"
         "  help              show commands\n"
         "  quit              exit\n"
         "\nGlossary:\n"
@@ -291,7 +291,7 @@
     (case command
       "find"
       (let [terms (remove str/blank? (str/split argument #"\s+"))]
-        (let [result (find-paths (:root state) terms)]
+        (let [result (find-paths (:workspace state) terms)]
           (print-candidates! result)
           (assoc state :candidates (:paths result))))
       "take"
@@ -301,7 +301,7 @@
         next-state)
       "add"
       (let [next-state (add-path state argument)]
-        (println "Added:" (normalize-path (:root state) argument))
+        (println "Added:" (normalize-path (:workspace state) argument))
         next-state)
       "list"
       (do (print-files! (:paths state)) state)
@@ -357,11 +357,11 @@
 
 (defn -main [& paths]
   (try
-    (let [root (path/to-root ".")]
+    (let [workspace (path/absolute ".")]
       (println "dj.ai.tooling dogfood")
-      (println "Root:" (str root))
+      (println "Workspace:" (str workspace))
       (println "Type `find`, `find TERM`, `add PATH`, or `help`.")
-      (loop [state (initial-state root paths)]
+      (loop [state (initial-state workspace paths)]
         (println)
         (println (str "Context: " (count (:paths state)) " "
                       (if (= 1 (count (:paths state))) "file" "files")

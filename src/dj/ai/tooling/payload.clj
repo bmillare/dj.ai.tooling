@@ -1,14 +1,15 @@
 (ns dj.ai.tooling.payload
   "Pure, bounded serialization of named text payloads. Never executes text.
   A document is {:blocks [{:id string :lang keyword :body string} ...]
-                 :root {:lang keyword :body string}}. Bodies are exact templates."
+                 :top-level {:lang keyword :body string}}. Bodies are exact templates."
   (:refer-clojure :exclude [resolve])
   (:require [dj.ai.tooling.payload.refs :as refs]
             [dj.ai.tooling.payload.strings :as strings]))
 
 (def default-limits
   "Character limits count UTF-16 code units, including retained intermediate
-  strings. Root counts toward input, total output, and depth, but not blocks."
+  strings. The top-level body counts toward input, total output, and depth, but
+  not blocks."
   {:max-blocks 128 :max-input-chars 1048576 :max-output-chars 1048576
    :max-total-chars 4194304 :max-depth 32})
 
@@ -59,21 +60,21 @@
      blocks)))
 
 (defn- prepare [doc limits]
-  (when-not (and (map? doc) (= #{:blocks :root} (set (keys doc))))
-    (fail "Supply a payload document with blocks and root." {:reason :invalid-document}))
-  (let [{:keys [blocks root]} doc]
+  (when-not (and (map? doc) (= #{:blocks :top-level} (set (keys doc))))
+    (fail "Supply a payload document with blocks and top-level." {:reason :invalid-document}))
+  (let [{:keys [blocks top-level]} doc]
     (validate-blocks blocks limits)
-    (when-not (and (map? root) (= #{:lang :body} (set (keys root))) (string? (:body root)))
-      (fail "Supply root with lang and a string body." {:reason :invalid-root :block :root}))
-    (when-not (contains? strings/safe-string (:lang root))
-      (fail "Choose a supported root language." {:reason :unknown-language :block :root :lang (:lang root)}))
-    (let [size (reduce + (count (:body root)) (map (comp count :body) blocks))]
+    (when-not (and (map? top-level) (= #{:lang :body} (set (keys top-level))) (string? (:body top-level)))
+      (fail "Supply top-level with lang and a string body." {:reason :invalid-top-level :block :top-level}))
+    (when-not (contains? strings/safe-string (:lang top-level))
+      (fail "Choose a supported top-level language." {:reason :unknown-language :block :top-level :lang (:lang top-level)}))
+    (let [size (reduce + (count (:body top-level)) (map (comp count :body) blocks))]
       (when (> size (:max-input-chars limits))
         (fail "Reduce payload input size." {:reason :limit-exceeded :limit :max-input-chars
                                             :maximum (:max-input-chars limits) :actual size})))
-    (let [nodes (into {:root (assoc root :tokens (refs/tokens (:body root)))}
+    (let [nodes (into {:top-level (assoc top-level :tokens (refs/tokens (:body top-level)))}
                       (map (fn [b] [(:id b) (assoc b :tokens (refs/tokens (:body b)))])) blocks)
-          ids (conj (mapv :id blocks) :root)]
+          ids (conj (mapv :id blocks) :top-level)]
       (doseq [id ids token (:tokens (get nodes id)) :when (map? token)]
         (when-not (contains? nodes (:id token))
           (fail (str "Declare payload " (pr-str (:id token))
@@ -94,7 +95,7 @@
    doc))
 
 (defn resolve
-  "Validates then resolves every definition and root, quoting each referenced
+  "Validates then resolves every definition and the top-level body, quoting each referenced
   value once for the referring block's language. Returns {:final :trace}.
   Trace is deterministic dependency order, with each named block exactly once.
   The graph is data; this function does not evaluate or execute its contents."

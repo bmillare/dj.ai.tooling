@@ -29,7 +29,7 @@
                         (fn [_ messages _]
                           (swap! requests conj messages)
                           (deliver started true) @gate
-                          (response "Hello <script>bad()</script>")))]
+                          (response "**Hello** `world`\n\n```bash\necho hello\n```\n\n[x](JaVaScRiPt:alert(1))\n\n<script>bad()</script>")))]
     (is (= 204 (:status (chat/send! h {:mode "chat" :task "Hi"}))))
     (is (= true (deref started 5000 :timeout)))
     (chat/send! h {:mode "chat" :task "Duplicate"})
@@ -41,6 +41,10 @@
     (await-idle h)
     (is (= ["system" "user" "assistant" "user"] (mapv #(get % "role") (last @requests))))
     (is (str/includes? (chat/page h) "&lt;script&gt;"))
+    (is (str/includes? (chat/page h) "<strong>Hello</strong>"))
+    (is (str/includes? (chat/page h) "<code>world</code>"))
+    (is (str/includes? (chat/page h) "<code class=\"language-bash\">"))
+    (is (str/includes? (chat/page h) "href=\"#blocked-link\""))
     (is (not (str/includes? (chat/page h) "<script>bad()")))
     (chat/new-chat! h)
     (is (empty? (:history @(:state h))))))
@@ -61,9 +65,9 @@
       (is (str/includes? (chat/page h) "Resolution trace")))))
 
 (deftest edit-review-is-explicit-once-and-checks-staleness
-  (let [root (.toFile (Files/createTempDirectory "chat-test" (make-array FileAttribute 0)))
-        file (java.io.File. root "note.txt")
-        h (chat/harness (str root) chat/default-config
+  (let [workspace (.toFile (Files/createTempDirectory "chat-test" (make-array FileAttribute 0)))
+        file (java.io.File. workspace "note.txt")
+        h (chat/harness (str workspace) chat/default-config
                         (fn [_ _ _] (response nil (call "e" "edit_file"
                                                         {"file" "note.txt" "search" "before" "replace" "after"}))))]
     (try
@@ -90,7 +94,7 @@
           (spit file "later")
           (chat/review! h (:token next-turn) true)
           (is (= "later" (slurp file)) "Cannot commit twice")))
-      (finally (.delete file) (.delete root)))))
+      (finally (.delete file) (.delete workspace)))))
 
 (deftest failures-release-busy-and-origin-is-required
   (let [h (chat/harness "." chat/default-config (fn [& _] (throw (ex-info "offline" {}))))]
@@ -101,3 +105,44 @@
                                     :headers {"host" "127.0.0.1:9091" "origin" "https://elsewhere"}}))))
     (is (= 204 (:status (chat/app h {:request-method :post :uri "/new"
                                     :headers {"host" "127.0.0.1:9091" "origin" "http://127.0.0.1:9091"}}))))))
+
+(defn await-approval [h]
+  (let [deadline (+ (System/nanoTime) 5000000000)]
+    (loop []
+      (let [command (last (:commands (last (:turns @(:state h)))))]
+        (cond
+          (= :approval (:status command)) command
+          (> (System/nanoTime) deadline) (throw (ex-info "No approval proposal" {:state @(:state h)}))
+          :else (do (Thread/sleep 10) (recur)))))))
+
+(deftest bash-approval-is-once-and-denial-never-executes
+  (let [n (atom 0) requests (atom [])
+        h (chat/harness "." chat/default-config
+                        (fn [_ messages _]
+                          (swap! requests conj messages)
+                          (if (odd? (swap! n inc))
+                            (response nil (call "b" "bash" {"body" "printf approved"}))
+                            (response "Command finished"))))]
+    (chat/send! h {:mode "chat" :task "Run" :bash-tools? true})
+    (let [command (await-approval h) token (get-in command [:proposal :id])]
+      (is (nil? (:result command)))
+      (is (= 1 @n))
+      (is (str/includes? (chat/page h) "Waiting for command approval"))
+      (chat/decide-command! h "wrong-token" true)
+      (is (= :approval (:status (await-approval h))))
+      (chat/decide-command! h token true)
+      (chat/decide-command! h token true)
+      (let [turn (await-idle h)]
+        (is (= :answer (get-in turn [:result :status])))
+        (is (= "approved" (get-in turn [:commands 0 :result :stdout :text])))
+        (is (= "b" (get (last (last @requests)) "tool_call_id"))))
+      (chat/new-chat! h)
+      (chat/send! h {:mode "chat" :task "Again" :bash-tools? true})
+      (let [next-command (await-approval h)]
+        (chat/decide-command! h token true)
+        (is (= :approval (:status (await-approval h))))
+        (chat/decide-command! h (get-in next-command [:proposal :id]) false)
+        (let [turn (await-idle h)]
+          (is (= :denied (get-in turn [:result :status])))
+          (is (false? (get-in turn [:commands 0 :result :executed]))))
+        (is (= 3 @n))))))

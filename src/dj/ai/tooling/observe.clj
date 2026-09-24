@@ -1,7 +1,8 @@
 (ns dj.ai.tooling.observe
   "Bounded snapshots and model-facing rendering."
   (:require [clojure.string :as str]
-            [dj.ai.tooling.path :as path])
+            [dj.ai.tooling.path :as path]
+            [dj.ai.tooling.workspace :as workspace])
   (:import [java.nio.file Files LinkOption Path]))
 
 (def ^:private no-link-options (make-array LinkOption 0))
@@ -17,14 +18,14 @@
 
 (defn- resolve-selector
   "Validates the required Selector keys; unknown keys are ignored."
-  [root selector-index selector]
+  [workspace selector-index selector]
   (cond
     (not (map? selector))
     {:error (invalid-selector selector-index selector :not-a-map)}
     (not= :file (:scheme selector))
     {:error (invalid-selector selector-index selector :unsupported-scheme)}
     :else
-    (let [{:keys [target error]} (path/resolve-under root (:path selector))]
+    (let [{:keys [target error]} (workspace/resolve-path workspace (:path selector))]
       (if error
         {:error (path-error selector-index selector error)}
         {:target target}))))
@@ -42,18 +43,15 @@
                :option option :value value}))
           options)))
 
-(defn- inspect-file [^Path root {:keys [selector ^Path target]}]
+(defn- inspect-file [{:keys [selector ^Path target]}]
   (let [file (:path selector)]
-    (if-not (path/exists? target)
+    (cond
+      (not (path/exists? target))
       {:error {:type :file-not-found :source selector :path file}}
-      (let [{:keys [^Path target error]} (path/realize root target)]
-        (cond
-          error
-          {:error {:type :invalid-path :source selector :path file :reason error}}
-          (not (Files/isRegularFile target no-link-options))
-          {:error {:type :not-a-regular-file :source selector :path file}}
-          :else
-          {:entry {:source selector :target target :bytes (Files/size target)}})))))
+      (not (Files/isRegularFile target no-link-options))
+      {:error {:type :not-a-regular-file :source selector :path file}}
+      :else
+      {:entry {:source selector :target target :bytes (Files/size target)}})))
 
 (defn- limit-errors [entries limits]
   (into
@@ -72,7 +70,7 @@
          [{:type :limit-exceeded :limit :max-total-bytes
            :maximum limit :actual total}])))))
 
-(defn- resolve-selectors [root selectors]
+(defn- resolve-selectors [workspace selectors]
   (reduce (fn [acc [selector-index selector]]
             (let [selector-key (when (map? selector)
                                  [(:scheme selector) (:path selector)])]
@@ -81,7 +79,7 @@
                         {:type :duplicate-selector
                          :selector-index selector-index :source selector})
                 (let [{:keys [target error]}
-                      (resolve-selector root selector-index selector)]
+                      (resolve-selector workspace selector-index selector)]
                   (cond-> acc
                     selector-key (update :seen conj selector-key)
                     error (update :errors conj error)
@@ -91,22 +89,22 @@
           (map-indexed vector selectors)))
 
 (defn snapshot
-  "Captures ordered whole-file Selectors beneath `root` as immutable Snapshots.
+  "Captures ordered whole-file Selectors in `workspace` as immutable Snapshots.
 
   A file Selector is `{:scheme :file :path relative-path}`; unknown Selector
   keys are ignored. Optional byte limits reject the entire capture before any
   content is returned. A rejected result carries every independent error."
-  ([root selectors] (snapshot root selectors {}))
-  ([root selectors options]
-   (let [root-path (path/to-root root)]
+  ([workspace selectors] (snapshot workspace selectors {}))
+  ([workspace selectors options]
+   (let [workspace (path/absolute workspace)]
      (if-let [error (options-error options)]
        {:status :rejected :errors [error]}
        (if-not (seq selectors)
          {:status :rejected :errors [{:type :no-selectors}]}
-         (let [{:keys [resolved errors]} (resolve-selectors root-path selectors)]
+         (let [{:keys [resolved errors]} (resolve-selectors workspace selectors)]
            (if (seq errors)
              {:status :rejected :errors errors}
-             (let [inspected (mapv #(inspect-file root-path %) resolved)
+             (let [inspected (mapv inspect-file resolved)
                    errors (into [] (keep :error) inspected)]
                (if (seq errors)
                  {:status :rejected :errors errors}

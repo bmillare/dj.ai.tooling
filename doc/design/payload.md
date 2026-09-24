@@ -15,10 +15,10 @@ value of its dependency:
 ```text
 python body:  print("hello")
 config body:  {"script": {{python}}}
-root body:    (load-config {{config}})
+top-level:    (load-config {{config}})
 ```
 
-Here `config` uses JSON quoting and the root uses Clojure quoting. The Python
+Here `config` uses JSON quoting and the top-level body uses Clojure quoting. The Python
 body is authored once; the model never computes the outer layers of escaping.
 Resolution returns text and a trace. It does not interpret that text as a
 program, write files, or invoke a subprocess.
@@ -83,7 +83,7 @@ Documents use plain maps/vectors, with keyword languages:
 (payload/resolve
  {:blocks [{:id "config" :lang :json :body "{\"script\": {{python}}}"}
            {:id "python" :lang :python :body "print(\"hello\")\n"}]
-  :root {:lang :clojure :body "(load-config {{config}})"}})
+  :top-level {:lang :clojure :body "(load-config {{config}})"}})
 ;; => {:final "...host-quoted Clojure text..."
 ;;     :trace [["python" "print(\"hello\")\n"] ["config" "...resolved JSON..."]]}
 ```
@@ -91,7 +91,7 @@ Documents use plain maps/vectors, with keyword languages:
 The escapes in this example are Clojure source notation, not instructions for a
 model's native tool output.
 
-Definitions have exactly `:id`, `:lang`, and `:body`. The root has exactly
+Definitions have exactly `:id`, `:lang`, and `:body`. The top-level body has exactly
 `:lang` and `:body`; it does not need a name or tool. IDs match
 `[A-Za-z_][A-Za-z0-9_-]*`, are unique within a document, and may be referenced
 before definition. Duplicate IDs are rejected rather than overwritten.
@@ -125,7 +125,7 @@ references *inside that child*, not how its parent quotes the child's value.
 Resolution is deterministic, memoized, and bottom-up. An explicit traversal
 stack avoids recursion on the JVM stack. Trace entries appear once per named
 block, dependencies first, with input definition order breaking independent
-ordering ties. Root is returned separately as `:final`. Trace strings are the
+ordering ties. The top-level body is returned separately as `:final`. Trace strings are the
 resolved values *before* their parents quote them.
 
 ### Limits and errors
@@ -142,10 +142,11 @@ noninteger values are rejected:
  :max-depth 32}
 ```
 
-Character counts use UTF-16 code units. Input includes all bodies and root.
-Output limits apply to each resolved block/root, and total output includes all
-retained intermediate values plus root. Root counts toward depth but not named
-block count. Repeated references and nested quoting can expand output much more
+Character counts use UTF-16 code units. Input includes all bodies, including
+the top-level body. Output limits apply to each resolved block and to the
+top-level body, and total output includes all retained intermediate values plus
+the top-level body. The top-level body counts toward depth but not named block
+count. Repeated references and nested quoting can expand output much more
 than linearly; this implementation bounds expanded data rather than assuming
 linear growth. Each fragment is checked before being appended to its output
 buffer; a bounded child's literal may be temporarily allocated before that
@@ -168,16 +169,17 @@ text. The API adapter converts these exceptions to structured tool diagnostics.
 - `run!`: a bounded HTTP conversation returning state and replay messages.
 
 Definitions are immutable within a session. Each response may define several
-pieces and supply at most one root. All definitions from that response are
-collected before resolving its root, regardless of call order. On any invalid
+pieces and supply at most one top-level body. All definitions from that
+response are collected before resolving its top-level body, regardless of call
+order. On any invalid
 call, duplicate ID, invalid graph, or limit error, the response's entire update
 is rejected and the previous state is retained. There is no partial acceptance.
 Start a new session to replace definitions or change the basis of composition.
 
 A definition-only response returns `:collecting`; acknowledgments identify
-stored IDs without echoing large bodies. A root returns `:resolved`, with
-`{:final ... :trace ...}` under the returned state's `:result`. Only the root
-call's result includes this text. Results explicitly state `executed: false`.
+stored IDs without echoing large bodies. A top-level body returns `:resolved`,
+with `{:final ... :trace ...}` under the returned state's `:result`. Only the
+top-level call's result includes this text. Results explicitly state `executed: false`.
 A no-call answer terminates the session as `:answer`. Malformed responses,
 transport failures, resolution errors, or exhausted turns stop the automatic
 workflow with diagnostics. There is no automatic repair or execution loop.
@@ -223,7 +225,7 @@ CRLF, trailing newlines, literal references, shell metacharacters, and empty
 strings. The extra shell layer uses the same inner definitions. Processes have
 a deadline and separate output capture; no model-generated programs are run.
 A NUL carried literally through Clojure/EDN is rejected at the shell boundary,
-with diagnostics identifying the referring root and script. These fixtures are
+with diagnostics identifying the referring top-level body and script. These fixtures are
 part of the normal suite under `nix develop`, with no live endpoint required.
 
 Run just these integration fixtures:

@@ -1,8 +1,9 @@
 (ns dj.ai.tooling.edit
   "Exact-search file patching with staged compare-and-set commits."
   (:require [clojure.string :as str]
+            [dj.ai.tooling.content-validation :as content-validation]
             [dj.ai.tooling.path :as path]
-            [dj.ai.tooling.validate :as validate])
+            [dj.ai.tooling.workspace :as workspace])
   (:import [java.nio.file Files OpenOption Path]
            [java.nio.file.attribute FileAttribute]))
 
@@ -107,7 +108,7 @@ Rules:
   vector replaces this entirely — append to this value to keep the
   defaults alongside additions."
   [{:matches? clojure-family-path?
-    :validators [validate/balanced-delimiters]}])
+    :validators [content-validation/balanced-delimiters]}])
 
 (defn- content-errors
   "Validates the final content of each successfully patched file against the
@@ -176,7 +177,7 @@ Rules:
   unknown: creation Patches (empty `:search`) assume absence, while edit
   Patches are rejected with `:file-not-in-basis`. Unknown Patch keys are
   ignored. Returns `{:status :ready :basis [...] :changes [...]}` (without
-  `:root`, so not directly committable) or a rejected result carrying every
+  `:workspace`, so not directly committable) or a rejected result carrying every
   independent error.
 
   Never validates content unless `opts` supplies
@@ -203,24 +204,22 @@ Rules:
                   [(:path source) {:existed? true :before content}])))
         snapshots))
 
-(defn- checked-lookup [root-path check-real? entry-fn]
+(defn- checked-lookup [resolve-fn workspace entry-fn]
   (fn [patch-index file]
-    (let [{:keys [target error]} (path/resolve-under root-path file)]
-      (cond
-        error {:error (path-error patch-index file error)}
-        (and check-real? (path/containment-error root-path target))
-        {:error (path-error patch-index file :outside-real-root)}
-        :else {:entry (entry-fn target file)}))))
+    (let [{:keys [target error]} (resolve-fn workspace file)]
+      (if error
+        {:error (path-error patch-index file error)}
+        {:entry (entry-fn target file)}))))
 
-(defn- staged [root-path lookup patches rules]
+(defn- staged [workspace lookup patches rules]
   (if-not (seq patches)
     {:status :rejected :errors [{:type :no-patches}]}
     (let [result (stage-entries lookup patches rules)]
       (cond-> result
-        (= :ready (:status result)) (assoc :root root-path)))))
+        (= :ready (:status result)) (assoc :workspace workspace)))))
 
 (defn stage
-  "Stages ordered file Patches beneath `root` without writing.
+  "Stages ordered file Patches in `workspace` without writing.
 
   With `snapshots` nil (or the two-argument arity) the basis is read from
   disk. Otherwise `snapshots` are observe file Snapshots and become the
@@ -237,16 +236,16 @@ Rules:
   stage is rejected with `:invalid-content` errors. `[]` turns validation
   off; a nonempty vector replaces the defaults entirely. Untouched files
   are never scanned."
-  ([root patches] (stage root patches nil nil))
-  ([root patches snapshots] (stage root patches snapshots nil))
-  ([root patches snapshots opts]
-   (let [root-path (path/to-root root)
+  ([workspace patches] (stage workspace patches nil nil))
+  ([workspace patches snapshots] (stage workspace patches snapshots nil))
+  ([workspace patches snapshots opts]
+   (let [workspace (path/absolute workspace)
          rules (get opts :content-validation-rules default-validation-rules)
          lookup (if snapshots
                   (let [basis (snapshots-basis snapshots)]
-                    (checked-lookup root-path false
+                    (checked-lookup workspace/resolve-path-lexically workspace
                                     (fn [_ file] (basis-entry basis file))))
-                  (checked-lookup root-path true
+                  (checked-lookup workspace/resolve-path workspace
                                   (fn [target file]
                                     (let [present? (path/exists? target)
                                           content (when present?
@@ -254,16 +253,12 @@ Rules:
                                       {:file file :known? true
                                        :existed? present? :exists? present?
                                        :before content :after content}))))]
-     (staged root-path lookup patches rules))))
+     (staged workspace lookup patches rules))))
 
-(defn- stale-error [^Path root {:keys [file existed? before]}]
-  (let [{:keys [target error]} (path/resolve-under root file)]
-    (cond
-      error
+(defn- stale-error [^Path workspace {:keys [file existed? before]}]
+  (let [{:keys [target error]} (workspace/resolve-path workspace file)]
+    (if error
       {:type :invalid-path :file file :reason error}
-      (path/containment-error root target)
-      {:type :invalid-path :file file :reason :outside-real-root}
-      :else
       (let [present? (path/exists? target)]
         (cond
           (not= existed? present?)
@@ -274,23 +269,23 @@ Rules:
 
 (defn commit!
   "Commits a ready Changeset iff every file still matches its basis."
-  [{:keys [status root basis changes]}]
+  [{:keys [status workspace basis changes]}]
   (cond
     (not= :ready status)
     {:status :rejected
      :errors [{:type :invalid-changeset :changeset-status status}]}
-    (or (not (instance? Path root)) (not (vector? basis))
+    (or (not (instance? Path workspace)) (not (vector? basis))
         (not (vector? changes))
         (not= (mapv :file basis) (mapv :file changes)))
     {:status :rejected
      :errors [{:type :invalid-changeset :reason :invalid-shape}]}
     :else
-    (let [errors (into [] (keep #(stale-error root %)) basis)]
+    (let [errors (into [] (keep #(stale-error workspace %)) basis)]
       (if (seq errors)
         {:status :rejected :errors errors}
         (do
           (doseq [{:keys [file after]} changes]
-            (let [{:keys [^Path target]} (path/resolve-under root file)]
+            (let [{:keys [^Path target]} (workspace/resolve-path-lexically workspace file)]
               (when-let [parent (.getParent target)]
                 (Files/createDirectories parent no-file-attributes))
               (Files/writeString target after no-open-options)))

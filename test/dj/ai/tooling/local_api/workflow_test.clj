@@ -12,14 +12,14 @@
    :timeout-ms 2000 :max-response-bytes 100000 :max-tokens 2000
    :repair-turn-budget 2 :snapshot-limits {:max-bytes-per-file 10000 :max-total-bytes 20000}})
 
-(defn with-root [f]
-  (let [root (Files/createTempDirectory "local-api-" (make-array FileAttribute 0))]
+(defn with-workspace [f]
+  (let [workspace (Files/createTempDirectory "local-api-" (make-array FileAttribute 0))]
     (try
-      (spit (str (.resolve root "a.txt")) "a")
-      (spit (str (.resolve root "b.txt")) "b")
-      (f root)
+      (spit (str (.resolve workspace "a.txt")) "a")
+      (spit (str (.resolve workspace "b.txt")) "b")
+      (f workspace)
       (finally
-        (with-open [paths (Files/walk root (make-array java.nio.file.FileVisitOption 0))]
+        (with-open [paths (Files/walk workspace (make-array java.nio.file.FileVisitOption 0))]
           (doseq [path (reverse (sort (iterator-seq (.iterator paths))))]
             (Files/deleteIfExists path)))))))
 
@@ -35,10 +35,10 @@
             (throw (ex-info "Unexpected request" {})))))))
 
 (deftest ordered-repair-from-original-basis-and-stale-commit
-  (with-root
-    (fn [root]
+  (with-workspace
+    (fn [workspace]
       (let [requests (atom [])
-            session (workflow/run! root selectors "edit" config
+            session (workflow/run! workspace selectors "edit" config
                                    (scripted [(response (edit-call "a" "a.txt" "a" "A")
                                                         (edit-call "b" "a.txt" "missing" "B")
                                                         (edit-call "c" "a.txt" "B" "done")
@@ -51,16 +51,16 @@
                (mapv #(get-in % [:tools 0 "function" "name"]) @requests)))
         (is (= ["a" "b" "c" "d"]
                (mapv #(get % "tool_call_id") (drop 3 (:messages (second @requests))))))
-        (is (= "a" (slurp (str (.resolve root "a.txt")))))
-        (spit (str (.resolve root "a.txt")) "external")
+        (is (= "a" (slurp (str (.resolve workspace "a.txt")))))
+        (spit (str (.resolve workspace "a.txt")) "external")
         (is (= :file-changed (-> (edit/commit! (:changeset session)) :errors first :type)))
-        (is (= "b" (slurp (str (.resolve root "b.txt")))))))))
+        (is (= "b" (slurp (str (.resolve workspace "b.txt")))))))))
 
 (deftest whole-proposal-revalidation-exposes-new-failure
-  (with-root
-    (fn [root]
+  (with-workspace
+    (fn [workspace]
       (let [requests (atom [])
-            session (workflow/run! root selectors "edit" config
+            session (workflow/run! workspace selectors "edit" config
                                    (scripted [(response (edit-call "a" "a.txt" "missing" "A")
                                                         (edit-call "b" "a.txt" "A" "done"))
                                               (response (revision "c" "p0" "a" "different"))
@@ -70,14 +70,14 @@
         (is (= "done" (get-in session [:changeset :changes 0 :after])))))))
 
 (deftest bounded-stops-and-atomic-repair-failure
-  (with-root
-    (fn [root]
+  (with-workspace
+    (fn [workspace]
       (doseq [[tail budget expected]
               [[[] 0 :repair-budget-exhausted]
                [[(response (revision "b" "p0" "missing" "B"))] 1 :repair-budget-exhausted]
                [[(response (revision "b" "unknown" "a" "B"))] 2 :ineligible-revision]]]
         (let [requests (atom [])
-              session (workflow/run! root selectors "edit" (assoc config :repair-turn-budget budget)
+              session (workflow/run! workspace selectors "edit" (assoc config :repair-turn-budget budget)
                                      (scripted (into [(response (edit-call "a" "a.txt" "missing" "A"))] tail)
                                                requests))]
           (is (= :stopped (:status session)))
@@ -86,41 +86,41 @@
             (is (= "A" (get-in session [:proposal 0 :replace])))))))))
 
 (deftest nonrepairable-errors-stop-without-another-request
-  (with-root
-    (fn [root]
+  (with-workspace
+    (fn [workspace]
       (doseq [call [(edit-call "a" "../outside" "" "x")
                     (edit-call "a" "a.txt" "" "x")
                     (edit-call "a" "new.clj" "" "(")]]
         (let [requests (atom [])
-              session (workflow/run! root selectors "edit" config (scripted [(response call)] requests))]
+              session (workflow/run! workspace selectors "edit" config (scripted [(response call)] requests))]
           (is (= :stopped (:status session)))
           (is (= 1 (count @requests))))))))
 
 (deftest answer-and-transport-failure-end-loop
-  (with-root
-    (fn [root]
+  (with-workspace
+    (fn [workspace]
       (let [answer {"choices" [{"finish_reason" "stop" "message" {"role" "assistant" "content" "hello"}}]}]
-        (is (= :answer (:status (workflow/run! root selectors "edit" config (scripted [answer] (atom [])))))))
+        (is (= :answer (:status (workflow/run! workspace selectors "edit" config (scripted [answer] (atom [])))))))
       (is (= [{:type :timeout}]
-             (:errors (workflow/run! root selectors "edit" config
+             (:errors (workflow/run! workspace selectors "edit" config
                                      (fn [& _] {:status :rejected :errors [{:type :timeout}]}))))))))
 
 (deftest terminal-review-commits-only-on-explicit-command
-  (with-root
-    (fn [root]
-      (let [session (workflow/run! root selectors "edit" config
+  (with-workspace
+    (fn [workspace]
+      (let [session (workflow/run! workspace selectors "edit" config
                                    (scripted [(response (edit-call "a" "a.txt" "a" "A"))] (atom [])))]
         (binding [*out* (java.io.StringWriter.)]
           (is (= :discarded (:status (with-in-str "discard\n" (terminal/review-session! session)))))
-          (is (= "a" (slurp (str (.resolve root "a.txt")))))
+          (is (= "a" (slurp (str (.resolve workspace "a.txt")))))
           (is (= :committed (:status (with-in-str "commit\n" (terminal/review-session! session))))))
-        (is (= "A" (slurp (str (.resolve root "a.txt")))))))))
+        (is (= "A" (slurp (str (.resolve workspace "a.txt")))))))))
 
 (deftest partial-repair-keeps-other-failures-pending
-  (with-root
-    (fn [root]
+  (with-workspace
+    (fn [workspace]
       (let [requests (atom [])
-            session (workflow/run! root selectors "edit" config
+            session (workflow/run! workspace selectors "edit" config
                                    (scripted [(response (edit-call "a" "a.txt" "wrong" "A")
                                                         (edit-call "b" "b.txt" "wrong" "B"))
                                               (response (revision "c" "p0" "a" "A"))

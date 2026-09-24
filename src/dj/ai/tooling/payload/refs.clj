@@ -51,8 +51,9 @@
 
 (defn resolve
   "Resolves already validated, tokenized nodes in dependency order. All nodes,
-  including unused definitions, are checked. Root uses the private keyword key
-  :root; model-defined IDs are strings. Trace excludes root."
+  including unused definitions, are checked. The top-level body uses the
+  private keyword key :top-level; model-defined IDs are strings. Trace excludes
+  the top-level body."
   [ids nodes s-table limits]
   (let [order (ordered-ids ids nodes)]
     (loop [remaining order memo {} depths {} trace [] total 0]
@@ -83,4 +84,4 @@
           (let [value (str output)]
             (recur (next remaining) (assoc memo id value) (assoc depths id depth)
                    (cond-> trace (string? id) (conj [id value])) (+ total (count value)))))
-        {:final (get memo :root) :trace trace}))))
+        {:final (get memo :top-level) :trace trace}))))

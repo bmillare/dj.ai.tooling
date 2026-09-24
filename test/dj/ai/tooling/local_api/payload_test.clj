@@ -56,7 +56,7 @@
     (let [truncated (assoc-in (response (define "b" "new" "text" "new")) ["choices" 0 "finish_reason"] "length")]
       (is (= state (:state (api/accept-response state truncated)))))))
 
-(deftest collection-enforces-limits-before-a-root-arrives
+(deftest collection-enforces-limits-before-a-top-level-arrives
   (let [state (api/initial-state {:max-input-chars 3})
         result (api/accept-response state (response (define "a" "x" "text" "four")))]
     (is (= :rejected (:status result)))

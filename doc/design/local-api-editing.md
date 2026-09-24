@@ -168,7 +168,7 @@ passed; final-content errors can still stop the whole proposal. A feedback
 status of `:repair` includes the eligible patch IDs. Tool results contain all
 patch evaluations, proposal-wide errors, and `committed: false`.
 
-`workflow/run!` takes root, selectors, task string, and configuration. Its fifth
+`workflow/run!` takes a workspace, selectors, task string, and configuration. Its fifth
 argument optionally injects a request function with `client/complete!`'s
 signature for deterministic consumers/tests. It returns `:ready`, `:answer`, or
 `:stopped`, along with snapshots, proposal, replay messages, repair-turn count,
@@ -187,7 +187,8 @@ filesystem failures become diagnostics. Custom validator exceptions retain the
 existing staging contract and propagate. Snapshot and sequential-commit
 limitations are unchanged.
 
-Run the terminal consumer from the target repository root:
+Run the terminal consumer from inside the target repository, which becomes the
+workspace:
 
 ```bash
 nix develop --command clojure -M:local-api local-api.edn task.txt README.md

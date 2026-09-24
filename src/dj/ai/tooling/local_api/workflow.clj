@@ -7,7 +7,7 @@
             [dj.ai.tooling.local-api.client :as client]))
 
 (def instructions
-  "Propose exact-search file edits using the advertised tool. Preserve strings exactly. Paths are relative to the supplied root. Patches run in order against the supplied snapshots; later patches see earlier replacements. Empty search creates a file. No files are committed by these tools. During repair, revise only eligible failed patch IDs; retained patches will all be staged again against the original snapshots. A human reviews and commits the complete proposal.")
+  "Propose exact-search file edits using the advertised tool. Preserve strings exactly. Paths are relative to the supplied workspace. Patches run in order against the supplied snapshots; later patches see earlier replacements. Empty search creates a file. No files are committed by these tools. During repair, revise only eligible failed patch IDs; retained patches will all be staged again against the original snapshots. A human reviews and commits the complete proposal.")
 
 (defn- filesystem-result [operation f]
   (try (f)
@@ -25,8 +25,8 @@
   Config requires the client's finite budgets plus :snapshot-limits with
   positive :max-bytes-per-file and :max-total-bytes. Optional :stage-options
   are passed to edit/stage. An injected request! has the complete! signature."
-  ([root selectors task config] (run! root selectors task config client/complete!))
-  ([root selectors task config request!]
+  ([workspace selectors task config] (run! workspace selectors task config client/complete!))
+  ([workspace selectors task config request!]
    (let [errors (cond-> (client/config-errors config)
                   (not (every? #(and (integer? %) (pos? %) (<= % Integer/MAX_VALUE))
                                ((juxt :max-bytes-per-file :max-total-bytes)
@@ -35,7 +35,7 @@
                   (not (string? task)) (conj {:type :invalid-task}))]
      (if (seq errors)
        {:status :stopped :errors errors}
-       (let [captured (filesystem-result :snapshot #(observe/snapshot root selectors (:snapshot-limits config)))]
+       (let [captured (filesystem-result :snapshot #(observe/snapshot workspace selectors (:snapshot-limits config)))]
          (if (not= :snapshotted (:status captured))
            (assoc captured :status :stopped)
            (loop [state {:snapshots (:snapshots captured) :proposal []
@@ -56,7 +56,7 @@
                                  (update :messages conj (:assistant accepted)))
                      :accepted
                      (let [proposal (:proposal accepted)
-                           changeset (filesystem-result :stage #(edit/stage root proposal (:snapshots state) (:stage-options config)))
+                           changeset (filesystem-result :stage #(edit/stage workspace proposal (:snapshots state) (:stage-options config)))
                            feedback (adapter/feedback proposal changeset)
                            next-state (-> state
                                           (assoc :proposal proposal :changeset changeset :feedback feedback)

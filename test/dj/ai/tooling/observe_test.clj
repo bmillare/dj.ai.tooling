@@ -8,18 +8,18 @@
   (Files/createTempDirectory "dj-ai-tooling-observe-"
                              (make-array FileAttribute 0)))
 
-(defn- write! [^Path root path content]
-  (let [target (.resolve root path)]
+(defn- write! [^Path workspace path content]
+  (let [target (.resolve workspace path)]
     (when-let [parent (.getParent target)]
       (Files/createDirectories parent (make-array FileAttribute 0)))
     (Files/writeString target content (make-array java.nio.file.OpenOption 0))))
 
 (deftest snapshots-and-renders-whole-files-in-order
-  (let [root (temp-dir)]
-    (write! root "src/a.clj" "(ns a)\n")
-    (write! root "README.md" "hello")
-    (let [result (observe/snapshot root [{:scheme :file :path "src/a.clj"}
-                                         {:scheme :file :path "README.md"}])]
+  (let [workspace (temp-dir)]
+    (write! workspace "src/a.clj" "(ns a)\n")
+    (write! workspace "README.md" "hello")
+    (let [result (observe/snapshot workspace [{:scheme :file :path "src/a.clj"}
+                                              {:scheme :file :path "README.md"}])]
       (is (= {:status :snapshotted
               :snapshots [{:source {:scheme :file :path "src/a.clj"}
                            :content "(ns a)\n"}
@@ -35,9 +35,9 @@
              (observe/render (:snapshots result)))))))
 
 (deftest rejects-per-file-limit-before-loading-content
-  (let [root (temp-dir)]
-    (write! root "large.txt" "12345")
-    (let [result (observe/snapshot root [{:scheme :file :path "large.txt"}]
+  (let [workspace (temp-dir)]
+    (write! workspace "large.txt" "12345")
+    (let [result (observe/snapshot workspace [{:scheme :file :path "large.txt"}]
                                    {:max-bytes-per-file 4})]
       (is (= :rejected (:status result)))
       (is (= {:type :limit-exceeded
@@ -49,10 +49,10 @@
              (first (:errors result)))))))
 
 (deftest rejects-total-limit
-  (let [root (temp-dir)]
-    (write! root "a.txt" "123")
-    (write! root "b.txt" "456")
-    (let [result (observe/snapshot root
+  (let [workspace (temp-dir)]
+    (write! workspace "a.txt" "123")
+    (write! workspace "b.txt" "456")
+    (let [result (observe/snapshot workspace
                                    [{:scheme :file :path "a.txt"}
                                     {:scheme :file :path "b.txt"}]
                                    {:max-total-bytes 5})]
@@ -60,67 +60,67 @@
       (is (= 6 (-> result :errors first :actual))))))
 
 (deftest rejects-missing-duplicate-and-outside-paths
-  (let [root (temp-dir)]
+  (let [workspace (temp-dir)]
     (is (= :file-not-found
-           (-> (observe/snapshot root [{:scheme :file :path "missing"}])
+           (-> (observe/snapshot workspace [{:scheme :file :path "missing"}])
                :errors first :type)))
     (is (= :duplicate-selector
-           (-> (observe/snapshot root [{:scheme :file :path "same"}
-                                       {:scheme :file :path "same"}])
+           (-> (observe/snapshot workspace [{:scheme :file :path "same"}
+                                            {:scheme :file :path "same"}])
                :errors first :type)))
     (is (= :invalid-path
-           (-> (observe/snapshot root [{:scheme :file :path "../outside"}])
+           (-> (observe/snapshot workspace [{:scheme :file :path "../outside"}])
                :errors first :type)))))
 
-(deftest rejects-symlinks-that-escape-the-real-root
-  (let [root (temp-dir)
+(deftest rejects-symlinks-that-escape-the-workspace
+  (let [workspace (temp-dir)
         outside (Files/createTempFile "dj-ai-tooling-outside-" ".txt"
                                       (make-array FileAttribute 0))]
     (Files/writeString outside "secret" (make-array java.nio.file.OpenOption 0))
-    (Files/createSymbolicLink (.resolve root "escape.txt") outside
+    (Files/createSymbolicLink (.resolve workspace "escape.txt") outside
                               (make-array FileAttribute 0))
-    (is (= :outside-real-root
-           (-> (observe/snapshot root [{:scheme :file :path "escape.txt"}])
+    (is (= :symlink-escape
+           (-> (observe/snapshot workspace [{:scheme :file :path "escape.txt"}])
                :errors first :reason)))))
 
 (deftest validates-request-and-limit-shapes
-  (let [root (temp-dir)]
+  (let [workspace (temp-dir)]
     (is (= :no-selectors
-           (-> (observe/snapshot root []) :errors first :type)))
+           (-> (observe/snapshot workspace []) :errors first :type)))
     (is (= :unsupported-scheme
-           (-> (observe/snapshot root [{:scheme :sql :query "select 1"}])
+           (-> (observe/snapshot workspace [{:scheme :sql :query "select 1"}])
                :errors first :reason)))
     (is (= :not-a-positive-integer
-           (-> (observe/snapshot root [{:scheme :file :path "a"}]
+           (-> (observe/snapshot workspace [{:scheme :file :path "a"}]
                                  {:max-total-bytes 0})
                :errors first :reason)))))
 
 (deftest tolerates-unknown-selector-keys
-  (let [root (temp-dir)]
-    (write! root "a.txt" "x")
-    (let [result (observe/snapshot root [{:scheme :file :path "a.txt"
-                                          :lines [1 2]}])]
+  (let [workspace (temp-dir)]
+    (write! workspace "a.txt" "x")
+    (let [result (observe/snapshot workspace [{:scheme :file :path "a.txt"
+                                               :lines [1 2]}])]
       (is (= :snapshotted (:status result)))
       (is (= {:scheme :file :path "a.txt" :lines [1 2]}
              (-> result :snapshots first :source))))))
 
 (deftest accumulates-independent-errors
-  (let [root (temp-dir)]
-    (write! root "big.txt" "12345")
-    (write! root "big2.txt" "123")
+  (let [workspace (temp-dir)]
+    (write! workspace "big.txt" "12345")
+    (write! workspace "big2.txt" "123")
     (is (= [:invalid-path :invalid-selector]
            (mapv :type (:errors (observe/snapshot
-                                 root
+                                 workspace
                                  [{:scheme :file :path "../out"}
                                   {:scheme :sql :query "select 1"}])))))
     (is (= [:file-not-found :file-not-found]
            (mapv :type (:errors (observe/snapshot
-                                 root
+                                 workspace
                                  [{:scheme :file :path "missing-a"}
                                   {:scheme :file :path "missing-b"}])))))
     (is (= [:max-bytes-per-file :max-bytes-per-file :max-total-bytes]
            (mapv :limit (:errors (observe/snapshot
-                                  root
+                                  workspace
                                   [{:scheme :file :path "big.txt"}
                                    {:scheme :file :path "big2.txt"}]
                                   {:max-bytes-per-file 2

@@ -158,15 +158,16 @@ validated and unknown keys are ignored, so consumers can decorate Patches
 flowing through the pipeline. A rejected stage carries every independent
 error (Patches after a failed Patch on the same file are not evaluated), so a
 model can repair all problems in one round trip. Staging and committing
-reject lexical path traversal and symlinks resolving outside the root.
+reject lexical path traversal and symlinks resolving outside the workspace
+(see [`doc/glossary.md`](doc/glossary.md)).
 
 Staged content is validated by default: for recognized Clojure-family paths
 (`.clj`, `.cljs`, `.cljc`, `.edn`), each touched file's final content must
 have balanced delimiters or the stage is rejected with `:invalid-content`
 errors carrying line/column detail rich enough for a one-round-trip repair.
-The check is `dj.ai.tooling.validate/balanced-delimiters`, a pure lexical
-scanner that understands strings, comments, character literals, and regex
-literals; it promises delimiter balance only — balanced does not imply
+The check is `dj.ai.tooling.content-validation/balanced-delimiters`, a pure
+lexical scanner that understands strings, comments, character literals, and
+regex literals; it promises delimiter balance only — balanced does not imply
 readable, and readable does not imply compilable. Validation runs once per
 touched file after all its patches apply, never on intermediate states, and
 untouched files are never scanned. Pass `:content-validation-rules` in
@@ -205,7 +206,7 @@ File is currently the only supported Selector scheme. Limits are optional and
 reject the entire snapshot operation before content is returned; there is
 intentionally no implicit truncation or windowing. Snapshotting also rejects missing files,
 non-regular files, lexical path traversal, and symlinks resolving outside the
-configured root. Selector maps are open — required keys are validated,
+configured workspace. Selector maps are open — required keys are validated,
 unknown keys are ignored — and a rejected snapshot carries every independent
 error.
 
@@ -245,21 +246,21 @@ clojure -M:dogfood
 clojure -M:dogfood src/dj/ai/tooling/edit.clj README.md
 ```
 
-The app always treats its process working directory as the target root. When
+The app always treats its process working directory as the workspace. When
 the tooling clone lives elsewhere, invoke it through an external launcher that
 puts its absolute `src` and `dev` directories on the classpath while preserving
 the current directory, as in `nix develop /path/to/dj.ai.tooling --command ...`.
 
 Type `help` for commands and a glossary. Add an exact path directly, or use
 `find TERM...` and `take cID...` for Git-independent partial matching. An empty
-`find` lists the first bounded set of files beneath the root. A typical loop is
+`find` lists the first bounded set of files in the workspace. A typical loop is
 selection -> `prompt`, then copy the model response and use `stage` -> `review`
 -> `commit`. `stage RESPONSE_FILE` bypasses the clipboard for deterministic
 testing. `stage` computes and displays a validated, non-writing Changeset,
 staging against the Snapshots captured by the most recent `prompt` when one
 was taken (so `commit` compares the world with what the model saw) and
 against the disk otherwise; `commit` compares and writes that exact staged
-Changeset. Absolute paths inside the root are
+Changeset. Absolute paths inside the workspace are
 normalized, while paths outside it are rejected. The app is an evaluation
 fixture under `dev/`, not public library porcelain.
 
@@ -312,6 +313,9 @@ limits. XML transport and execution are deferred.
 A minimal dj.web chat harness under `dev/` exercises ordinary chat, payload
 composition, and local API editing with expandable model/tool traces. Edits
 wait for explicit diff review and commit; payload text is never executed.
+Enable **Bash tools** in Chat to let the model compose commands with payload
+references. Each resolved script waits for **Run / Deny**; execution results
+return to the model for continuation. Commands have finite time and output limits.
 
 ```bash
 nix develop --command clojure -M:chat
@@ -319,8 +323,8 @@ nix develop --command clojure -M:chat
 nix develop --command clojure -M:chat dev/chat.edn /path/to/workspace
 ```
 
-Open **http://127.0.0.1:9091**. Defaults target `gemma-4-12b` at
-`http://127.0.0.1:8080/v1`. The conversation is shared across tabs and kept in
+Open **http://127.0.0.1:9091**. Defaults target Qwen3.8 27B at
+`http://localhost:17070/v1`. The conversation is shared across tabs and kept in
 memory. See [the harness design and walkthrough](doc/design/chat-harness.md)
 for modes, configuration, session boundaries, and verification.
 

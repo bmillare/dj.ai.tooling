@@ -7,7 +7,7 @@
             [dj.ai.tooling.payload.strings :as strings]))
 
 (defn block [id lang body] {:id id :lang lang :body body})
-(defn doc [blocks lang body] {:blocks blocks :root {:lang lang :body body}})
+(defn doc [blocks lang body] {:blocks blocks :top-level {:lang lang :body body}})
 (defn error [f] (try (f) nil (catch clojure.lang.ExceptionInfo e (ex-data e))))
 
 (deftest resolves-nested-literals-and-forward-references
@@ -36,7 +36,7 @@
     (let [result (error #(payload/resolve (doc [(block "x" :text "value")] :json body)))]
       (is (= :quoted-reference (:reason result)))
       (is (= 1 (:at result)))
-      (is (= :root (:block result)))))
+      (is (= :top-level (:block result)))))
   (is (= "\"{{x}}\"" (:final (payload/resolve (doc [] :text "\"\\{{x}}\""))))))
 
 (deftest rejects-invalid-documents-before-resolution
@@ -48,12 +48,12 @@
            [(doc [(block "x" :no-such-language "")] :text "") :unknown-language]
            [(doc [(block "x" :text "") (block "x" :text "")] :text "") :duplicate-id]
            [(doc [] :no-such-language "") :unknown-language]
-           [(doc [] :text nil) :invalid-root]
+           [(doc [] :text nil) :invalid-top-level]
            [(doc [] :text "prefix {{missing}}") :unknown-reference]
            [(doc [(block "unused" :text "{{missing}}") ] :text "") :unknown-reference]]]
     (is (= reason (:reason (error #(payload/resolve input)))) (pr-str input)))
   (is (= {:stage :validate :type :invalid-payload :reason :unknown-reference
-          :block :root :ref "missing" :at 7}
+          :block :top-level :ref "missing" :at 7}
          (error #(payload/resolve (doc [] :text "prefix {{missing}}"))))))
 
 (deftest cycles-and-shared-dependencies
