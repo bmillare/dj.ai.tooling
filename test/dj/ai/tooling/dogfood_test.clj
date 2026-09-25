@@ -163,3 +163,52 @@
                        (make-array java.nio.file.OpenOption 0))
     (is (= ["a.txt" "b.txt"]
            (:paths (dogfood/find-paths workspace []))))))
+
+(deftest rebase-replaces-a-stale-changeset-and-commit-keeps-both-edits
+  (let [workspace (temp-dir)
+        target (.resolve workspace "target.txt")
+        response (.resolve workspace "response.txt")
+        no-options (make-array java.nio.file.OpenOption 0)]
+    (Files/writeString target "top\nbottom\n" no-options)
+    (Files/writeString
+     response
+     (str "<edit file=\"target.txt\">\n"
+          "<search>\nbottom\n</search>\n"
+          "<replace>\nBOTTOM\n</replace>\n"
+          "</edit>\n")
+     no-options)
+    (let [staged (dogfood/execute-command
+                  (dogfood/initial-state workspace ["target.txt"])
+                  (str "stage " response))]
+      (Files/writeString target "TOP\nbottom\n" no-options)
+      (let [stale (dogfood/execute-command staged "commit")
+            output (with-out-str (dogfood/execute-command stale "commit"))]
+        (is (= (:changeset staged) (:changeset stale)))
+        (is (.contains ^String output "run rebase"))
+        (let [rebased (dogfood/execute-command stale "rebase")]
+          (is (not= (:changeset stale) (:changeset rebased)))
+          (is (= "TOP\nbottom\n" (Files/readString target)))
+          (dogfood/execute-command rebased "commit")
+          (is (= "TOP\nBOTTOM\n" (Files/readString target))))))))
+
+(deftest a-conflicting-rebase-keeps-the-previous-changeset
+  (let [workspace (temp-dir)
+        target (.resolve workspace "target.txt")
+        response (.resolve workspace "response.txt")
+        no-options (make-array java.nio.file.OpenOption 0)]
+    (Files/writeString target "before\n" no-options)
+    (Files/writeString
+     response
+     (str "<edit file=\"target.txt\">\n"
+          "<search>\nbefore\n</search>\n"
+          "<replace>\nafter\n</replace>\n"
+          "</edit>\n")
+     no-options)
+    (let [staged (dogfood/execute-command (dogfood/initial-state workspace [])
+                                          (str "stage " response))]
+      (Files/writeString target "rewritten\n" no-options)
+      (let [output (with-out-str
+                     (is (= (:changeset staged)
+                            (:changeset (dogfood/execute-command staged "rebase")))))]
+        (is (.contains ^String output "Conflict"))
+        (is (= "rewritten\n" (Files/readString target)))))))

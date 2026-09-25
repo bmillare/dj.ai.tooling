@@ -130,6 +130,10 @@ review token so an old browser button cannot commit a new proposal after reset.
 Commit uses the exact staged value and the library's existing conflict checks;
 its multi-file atomicity limitations still apply.
 
+Future work: offer Rebase when commit is rejected as stale. A rebased
+Changeset is a different value, so it needs a new review token; the old
+token must not commit it.
+
 ## Bounds and scope
 
 HTTP requests use the library's finite deadline, response-byte and token caps;

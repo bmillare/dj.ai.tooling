@@ -341,3 +341,135 @@
                              [{:path "a.clj" :search "x" :replace "y"}]
                              nil
                              {:content-validation-rules rules})))))
+
+(deftest staged-changesets-carry-their-proposal-and-satisfy-the-apply-invariant
+  (let [workspace (temp-dir)
+        proposal [{:path "a.clj" :search "(old)" :replace "(new)"}
+                  {:path "a.clj" :search "(new)" :replace "(newer)"}
+                  {:path "b.txt" :search "" :replace "created\n"}]]
+    (write! workspace "a.clj" "(old)\n")
+    (let [cs (edit/stage workspace proposal)
+          opts {:content-validation-rules edit/default-validation-rules}]
+      (is (= :ready (:status cs)))
+      (is (= proposal (:proposal cs)))
+      (is (vector? (:proposal cs)))
+      (is (= (:changes cs)
+             (:changes (edit/apply-patches (:basis cs) (:proposal cs) opts)))))
+    (is (= proposal
+           (:proposal (edit/apply-patches {"a.clj" {:existed? true :before "(old)\n"}}
+                                          (seq proposal)))))))
+
+(deftest changesets-preserve-unknown-patch-keys-in-their-proposal
+  (let [workspace (temp-dir)]
+    (write! workspace "a.txt" "old\n")
+    (is (= [{:path "a.txt" :search "old" :replace "new" :patch-id "p0"}]
+           (:proposal (edit/stage workspace [{:path "a.txt" :search "old"
+                                              :replace "new" :patch-id "p0"}]))))))
+
+(deftest rebase-of-a-current-changeset-is-the-identity
+  (let [workspace (temp-dir)]
+    (write! workspace "a.txt" "one\ntwo\n")
+    (let [cs (edit/stage workspace [{:path "a.txt" :search "two" :replace "2"}
+                                    {:path "b.txt" :search "" :replace "b\n"}])
+          rebased (edit/rebase workspace cs)]
+      (is (= :ready (:status rebased)))
+      (is (= (select-keys cs [:basis :changes :proposal])
+             (select-keys rebased [:basis :changes :proposal]))))))
+
+(deftest rebase-lands-patches-when-drift-misses-every-searched-region
+  (let [workspace (temp-dir)]
+    (write! workspace "a.txt" "top\nmiddle\nbottom\n")
+    (let [cs (edit/stage workspace [{:path "a.txt" :search "bottom" :replace "BOTTOM"}])]
+      (write! workspace "a.txt" "TOP\nmiddle\nbottom\n")
+      (let [rebased (edit/rebase workspace cs)]
+        (is (= :ready (:status rebased)))
+        (is (= "TOP\nmiddle\nbottom\n" (get-in rebased [:basis "a.txt" :before])))
+        (is (= :committed (:status (edit/commit! workspace rebased))))
+        (is (= "TOP\nmiddle\nBOTTOM\n" (read! workspace "a.txt")))))))
+
+(deftest rebase-conflicts-when-drift-removes-a-searched-region
+  (let [workspace (temp-dir)]
+    (write! workspace "a.txt" "keep\ntarget\n")
+    (let [cs (edit/stage workspace [{:path "a.txt" :search "target" :replace "hit"}])]
+      (write! workspace "a.txt" "keep\ngone\n")
+      (let [rebased (edit/rebase workspace cs)]
+        (is (= :rejected (:status rebased)))
+        (is (= [{:type :search-not-found :patch-index 0 :path "a.txt"
+                 :search "target"}]
+               (:errors rebased)))))))
+
+(deftest rebase-conflicts-when-drift-duplicates-a-searched-region
+  (let [workspace (temp-dir)]
+    (write! workspace "a.txt" "target\n")
+    (let [cs (edit/stage workspace [{:path "a.txt" :search "target" :replace "hit"}])]
+      (write! workspace "a.txt" "target\ntarget\n")
+      (let [rebased (edit/rebase workspace cs)]
+        (is (= [:search-not-unique] (mapv :type (:errors rebased))))
+        (is (= 2 (-> rebased :errors first :match-count)))))))
+
+(deftest rebase-conflicts-when-a-created-file-appeared
+  (let [workspace (temp-dir)
+        cs (edit/stage workspace [{:path "new.txt" :search "" :replace "mine\n"}])]
+    (write! workspace "new.txt" "theirs\n")
+    (is (= [:file-already-exists] (mapv :type (:errors (edit/rebase workspace cs)))))))
+
+(deftest rebase-conflicts-when-a-touched-file-was-deleted
+  (let [workspace (temp-dir)]
+    (write! workspace "a.txt" "old\n")
+    (let [cs (edit/stage workspace [{:path "a.txt" :search "old" :replace "new"}])]
+      (Files/delete (.resolve workspace "a.txt"))
+      (is (= [:file-not-found] (mapv :type (:errors (edit/rebase workspace cs))))))))
+
+(deftest rebase-revalidates-the-rebased-content
+  (let [workspace (temp-dir)]
+    (write! workspace "a.clj" "(a)\n(b)\n")
+    (let [cs (edit/stage workspace [{:path "a.clj" :search "(b)" :replace "(c)"}])]
+      (write! workspace "a.clj" "(a\n(b)\n")
+      (let [rebased (edit/rebase workspace cs)]
+        (is (= :rejected (:status rebased)))
+        (is (= #{:invalid-content} (set (map :type (:errors rebased))))))
+      (is (= :ready (:status (edit/rebase workspace cs
+                                          {:content-validation-rules []})))))))
+
+(deftest rebase-rejects-a-changeset-that-is-not-ready
+  (let [workspace (temp-dir)
+        rejected (edit/stage workspace [])]
+    (is (= [{:type :invalid-changeset :reason :not-ready :status :rejected}]
+           (:errors (edit/rebase workspace rejected))))))
+
+(deftest rebase-rejects-a-changeset-without-a-proposal
+  (let [workspace (temp-dir)]
+    (write! workspace "a.txt" "old\n")
+    (let [cs (dissoc (edit/stage workspace [{:path "a.txt" :search "old" :replace "new"}])
+                     :proposal)]
+      (is (= [{:type :invalid-changeset :reason :no-proposal}]
+             (:errors (edit/rebase workspace cs)))))))
+
+(deftest rebase-writes-nothing
+  (let [workspace (temp-dir)]
+    (write! workspace "a.txt" "top\nbottom\n")
+    (let [clean (edit/stage workspace [{:path "a.txt" :search "bottom" :replace "B"}
+                                       {:path "new.txt" :search "" :replace "n\n"}])
+          conflicting (edit/stage workspace [{:path "a.txt" :search "top" :replace "T"}])]
+      (write! workspace "a.txt" "TOP\nbottom\n")
+      (is (= :ready (:status (edit/rebase workspace clean))))
+      (is (= :rejected (:status (edit/rebase workspace conflicting))))
+      (is (= "TOP\nbottom\n" (read! workspace "a.txt")))
+      (is (not (Files/exists (.resolve workspace "new.txt")
+                             (make-array java.nio.file.LinkOption 0)))))))
+
+(deftest stale-commit-rebases-and-commits
+  (let [workspace (temp-dir)]
+    (write! workspace "a.txt" "alpha\nbeta\ngamma\n")
+    (let [snapshots [{:source {:scheme :file :path "a.txt"}
+                      :content "alpha\nbeta\ngamma\n"}]
+          cs (edit/stage workspace [{:path "a.txt" :search "gamma" :replace "GAMMA"}]
+                         snapshots)]
+      (is (= :ready (:status cs)))
+      ;; a concurrent writer edits an independent region of the same file
+      (write! workspace "a.txt" "ALPHA\nbeta\ngamma\n")
+      (is (= [:stale-basis] (mapv :type (:errors (edit/commit! workspace cs)))))
+      (let [rebased (edit/rebase workspace cs)]
+        (is (= :ready (:status rebased)))
+        (is (= :committed (:status (edit/commit! workspace rebased))))
+        (is (= "ALPHA\nbeta\nGAMMA\n" (read! workspace "a.txt")))))))

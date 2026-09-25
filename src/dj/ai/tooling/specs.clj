@@ -36,13 +36,15 @@
 (s/def ::snapshot (s/keys :req-un [::source ::content]))
 (s/def ::snapshots (s/coll-of ::snapshot))
 
-;; Changeset — ordered changes plus the basis they were computed from. The
-;; basis is keyed by path; :changes carries the first-touched order.
+;; Changeset — ordered changes, the basis they were computed from, and the
+;; proposal that produced them. The basis is keyed by path; :changes carries
+;; the first-touched order. Applying :proposal to :basis yields :changes.
 (s/def ::existed? boolean?)
 (s/def ::before (s/nilable string?))
 (s/def ::after string?)
 (s/def ::basis (s/map-of ::path (s/keys :req-un [::existed? ::before])))
 (s/def ::changes (s/coll-of (s/keys :req-un [::path ::after]) :kind vector?))
+(s/def ::proposal (s/coll-of ::patch :kind vector?))
 
 ;; Results — every operation returns a map tagged by :status.
 (s/def ::status #{:ready :rejected :snapshotted :committed})
@@ -51,4 +53,4 @@
 (s/def ::errors (s/coll-of ::error :kind vector? :min-count 1))
 (s/def ::result
   (s/keys :req-un [::status]
-          :opt-un [::basis ::changes ::errors ::snapshots]))
+          :opt-un [::basis ::changes ::proposal ::errors ::snapshots]))

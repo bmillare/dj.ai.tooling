@@ -5,18 +5,21 @@
       model reply ---parse---> Patches
       Patches + basis --stage--> Changeset | rejected
       Changeset ---(review)---> commit! ---> world | rejected (stale)
+      stale Changeset --rebase--> Changeset (current basis) | rejected
 
   `parse` is pure. `stage` reads the basis, either from disk or from the
   Snapshots the model saw, then runs the Patches in order: each touched
   file starts from its basis and later Patches see earlier replacements.
   The first failing Patch on a file makes it a failed file, and the file's
   later Patches are not evaluated. Every other touched file is content
-  validated. The result is a ready Changeset, `{:basis :changes}`, or a
-  rejected result that carries every independent error. `apply-patches` is
-  the I/O-free core of `stage`.
+  validated. The result is a ready Changeset, `{:basis :changes :proposal}`,
+  or a rejected result that carries every independent error.
+  `apply-patches` is the I/O-free core of `stage`.
 
   Only `commit!` writes. It compares every basis entry with the Workspace and
-  writes the changes only if nothing has become stale."
+  writes the changes only if nothing has become stale. `rebase` stages a
+  stale Changeset's proposal again against a disk basis, yielding a new
+  Changeset that returns to review."
   (:require [clojure.string :as str]
             [dj.ai.tooling.content-validation :as content-validation]
             [dj.ai.tooling.path :as path]
@@ -186,7 +189,8 @@ Rules:
                                                     [:existed? :before])]))
                           order)
              :changes (mapv #(select-keys (get entries %) [:path :after])
-                            order)}))))))
+                            order)
+             :proposal (vec patches)}))))))
 
 (defn- basis-entry [basis path]
   (if-let [{:keys [existed? before]} (get basis path)]
@@ -201,7 +205,11 @@ Rules:
   `basis` are unknown: creation Patches (empty `:search`) assume absence,
   while edit Patches are rejected with `:file-not-in-basis`. Unknown Patch
   keys are ignored. Returns a ready Changeset or a rejected result carrying
-  every independent error.
+  every independent error. A ready Changeset carries its `:proposal`, the
+  Patches as given (unknown keys preserved), so it can be re-derived:
+
+      (= (:changes (apply-patches (:basis cs) (:proposal cs) opts))
+         (:changes cs))
 
   Never validates content unless `opts` supplies
   `:content-validation-rules` — an ordered vector of
@@ -286,6 +294,40 @@ Rules:
           {:type :stale-basis :path path :reason :content-changed}
           :else nil)))))
 
+(defn- changeset-error
+  "The first reason `changeset` cannot be committed or rebased, or nil."
+  [{:keys [status basis changes]}]
+  (cond
+    (not= :ready status)
+    {:type :invalid-changeset :reason :not-ready :status status}
+    (or (not (map? basis)) (not (vector? changes))
+        (not (every? #(contains? basis (:path %)) changes)))
+    {:type :invalid-changeset :reason :invalid-shape}))
+
+(defn rebase
+  "Stages a Changeset's proposal again in `workspace`, against a disk basis.
+  Writes nothing.
+
+  A Changeset whose basis is stale cannot commit; rebasing it yields a new
+  ready Changeset whose basis is current, or a rejected result. Each Patch
+  lands wherever its `:search` still occurs exactly once, so concurrent
+  edits that leave every searched region alone rebase cleanly. A Patch that
+  no longer applies is a conflict, reported with the ordinary stage errors
+  (`:search-not-found`, `:search-not-unique`, `:file-already-exists`,
+  `:file-not-found`). Rebasing a current Changeset returns an equal one.
+
+  The Changeset must be `:ready` and carry `:proposal`; otherwise the result
+  is rejected with `:invalid-changeset`. Content validation rules are not
+  stored in a Changeset, so `opts` behaves exactly as in `stage`: omitted,
+  `default-validation-rules` apply to the rebased content."
+  ([workspace changeset] (rebase workspace changeset nil))
+  ([workspace changeset opts]
+   (if-let [error (or (changeset-error changeset)
+                      (when-not (vector? (:proposal changeset))
+                        {:type :invalid-changeset :reason :no-proposal}))]
+     {:status :rejected :errors [error]}
+     (stage workspace (:proposal changeset) nil opts))))
+
 (defn commit!
   "Writes a ready Changeset into `workspace` iff its basis is still current.
 
@@ -293,18 +335,12 @@ Rules:
   mismatch rejects the commit with a `:stale-basis` error before anything
   is written. The basis may hold entries for files the changes do not touch;
   they are compared all the same. Changes are then written in order.
-  Returns `{:status :committed :changes [...]}` or a rejected result."
-  [workspace {:keys [status basis changes]}]
+  Returns `{:status :committed :changes [...]}` or a rejected result. A
+  stale Changeset can be brought current with `rebase`."
+  [workspace {:keys [basis changes] :as changeset}]
   (let [workspace (path/absolute workspace)]
-    (cond
-      (not= :ready status)
-      {:status :rejected
-       :errors [{:type :invalid-changeset :reason :not-ready :status status}]}
-      (or (not (map? basis)) (not (vector? changes))
-          (not (every? #(contains? basis (:path %)) changes)))
-      {:status :rejected
-       :errors [{:type :invalid-changeset :reason :invalid-shape}]}
-      :else
+    (if-let [error (changeset-error changeset)]
+      {:status :rejected :errors [error]}
       (let [errors (into [] (keep #(stale-error workspace %)) (sort-by key basis))]
         (if (seq errors)
           {:status :rejected :errors errors}

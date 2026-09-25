@@ -113,6 +113,12 @@ basis at commit—stop automation with diagnostics for the user. Changing files,
 adding/removing/reordering patches during repair, or refreshing the snapshot
 basis requires starting a new proposal.
 
+A stale basis at commit still stops automation: `run!` never rebases.
+Rebase (`edit/rebase`) is a review action taken by the person or harness
+holding the Changeset, and the rebased Changeset returns to review. The
+Changesets `run!` produces carry their proposal, so they can be rebased
+without any workflow change.
+
 ## Clojure implementation shape
 
 - Use plain immutable maps and vectors for session state, ordered proposals,

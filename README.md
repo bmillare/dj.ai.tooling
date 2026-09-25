@@ -131,7 +131,8 @@ which transforms basis values into a Changeset with no I/O at all.
 XML-style `<edit>`, `<search>`, and `<replace>` blocks. It supports multiple
 ordered Patches, validates the complete Changeset before writing, rejects
 missing or ambiguous searches, and compares the filesystem with the staged
-basis when committing.
+basis when committing. A Changeset carries its `:proposal`, so a stale one
+can be rebased onto the current disk (see Rebase in the glossary).
 
 ```clojure
 (require '[dj.ai.tooling.edit :as edit])
@@ -153,6 +154,15 @@ basis when committing.
 ;; value; the Workspace it is committed into is passed alongside it.
 (when (= :ready (:status changeset))
   (edit/commit! "." changeset))
+
+;; If commit! is rejected with :stale-basis because someone else edited a
+;; touched file, rebase restages the same Patches against the current disk.
+;; Patches land wherever their :search is still unique, so concurrent edits
+;; to other regions of the same file pass, as in git. The rebased Changeset
+;; is a new value: review it again before committing.
+(def rebased (edit/rebase "." changeset))
+(when (= :ready (:status rebased))
+  (edit/commit! "." rebased))
 ```
 
 Patch maps are open: the required `:path`, `:search`, and `:replace` keys are
@@ -226,6 +236,10 @@ depend on it.
 - `commit!` has an unavoidable window between comparing the basis and
   writing; the compare-and-set protects against staleness, not against a
   concurrent writer racing the write itself.
+- `rebase` lands a Patch wherever its `:search` is still unique, including a
+  region that moved.
+- `rebase` detects textual conflicts only; two edits that each apply cleanly
+  can still be wrong together.
 - `snapshot` checks byte limits before reading content, so a file growing
   between the size check and the read can exceed the configured limit.
 
@@ -262,7 +276,10 @@ testing. `stage` computes and displays a validated, non-writing Changeset,
 staging against the Snapshots captured by the most recent `prompt` when one
 was taken (so `commit` compares the world with what the model saw) and
 against the disk otherwise; `commit` compares and writes that exact staged
-Changeset. Absolute paths inside the workspace are
+Changeset. When `commit` reports a stale basis, `rebase` restages the same
+Patches against the current disk and replaces the staged Changeset (a
+conflict keeps the old one); `review` it before committing again. Absolute
+paths inside the workspace are
 normalized, while paths outside it are rejected. The app is an evaluation
 fixture under `dev/`, not public library porcelain.
 

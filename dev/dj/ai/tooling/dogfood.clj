@@ -267,6 +267,8 @@
         "                    (against the last prompt's snapshots when taken)\n"
         "  review            show the staged changeset diff again\n"
         "  commit            commit the reviewed changeset if its basis is current\n"
+        "  rebase            restage a stale changeset's patches against disk\n"
+        "                    (review again before commit)\n"
         "  status            show workspace, limits, and staged work\n"
         "  help              show commands\n"
         "  quit              exit\n"
@@ -274,7 +276,19 @@
         "  context    selected files whose snapshots go into the model prompt\n"
         "  response   model output containing XML-style file patches\n"
         "  changeset  proposed contents plus the basis they were computed from\n"
-        "  staged     the exact reviewed changeset that `commit` will compare and write")))
+        "  staged     the exact reviewed changeset that `commit` will compare and write\n"
+        "  stale      the files changed since the changeset's basis was taken\n"
+        "  conflict   a patch that no longer applies after rebase")))
+
+(defn- changed-afters
+  "Paths whose final content differs between two Changesets, in the new
+  Changeset's order."
+  [previous changeset]
+  (let [before (into {} (map (juxt :path :after)) (:changes previous))]
+    (into []
+          (keep (fn [{:keys [path after]}]
+                  (when (not= after (get before path)) path)))
+          (:changes changeset))))
 
 (defn- command-parts [line]
   (let [line (str/trim line)]
@@ -343,8 +357,26 @@
                    (pr-str (if (= :committed (:status result))
                              {:files (mapv :path (:changes result))}
                              (:errors result))))
+          (when (some #(= :stale-basis (:type %)) (:errors result))
+            (println "The basis is stale; run rebase."))
           (cond-> state
             (= :committed (:status result)) (assoc :changeset nil)))
+        (do (println "Nothing staged; run stage first.") state))
+      "rebase"
+      (if (= :ready (-> state :changeset :status))
+        (let [previous (:changeset state)
+              rebased (edit/rebase (:workspace state) previous)]
+          (if (= :ready (:status rebased))
+            (let [changed (changed-afters previous rebased)]
+              (println "Rebased:"
+                       (if (seq changed)
+                         (str "final content changed for " (str/join ", " changed)
+                              "; run review before commit.")
+                         "final content unchanged."))
+              (assoc state :changeset rebased))
+            (do (println "Conflict; keeping the previous changeset:"
+                         (pr-str (:errors rebased)))
+                state)))
         (do (println "Nothing staged; run stage first.") state))
       "status"
       (do (print-status! state) state)
