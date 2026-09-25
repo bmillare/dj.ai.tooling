@@ -356,20 +356,74 @@ would submit a line.
 ## Settle
 
 The wait condition: no new Transcript bytes for `settle-ms`, measured from
-the later of the call's start and the last byte. `await` returns
-`:settled` on it, `:timed-out` when `timeout-ms` passes with output still
-flowing, and `:exited` when the pane is dead. A silent Terminal settles
-with empty output. Settle is a heuristic and never means "done": a quiet
-prompt, a program waiting on stdin, and a slow computation look the same to
-it. The Observation's **foreground**, tmux's `#{pane_current_command}`, is
-the exact signal that tells them apart most of the time, and the model
-reads it before deciding to wait longer. An exact prompt-return signal
-(`tmux wait-for`) is designed and deferred.
+the later of the Wait's start and the last byte, and not before the Floor.
+`await` returns `:settled` on it, `:timed-out` when the Ceiling passes
+with output still flowing, and `:exited` when the pane is dead. A silent
+Terminal settles with empty output. Settle is a heuristic and never means
+"done": a quiet prompt, a program waiting on stdin, and a slow computation
+look the same to it. The Observation's **foreground**, tmux's
+`#{pane_current_command}`, is an exact value whose reading is not exact:
+`bash` is usually a prompt but also a pipeline ending in a builtin. The
+model reads it, with the Clock, before deciding to wait longer. An exact
+`:done` Verdict (OSC 133 completion markers) is designed and deferred.
+
+## Wait
+
+One blocking `await`: it starts at a mark, ends with an Observation, and
+lasts at least the Floor and at most the Ceiling. A tool call may hold
+several Waits (see Back-off); the model sees one result with the Clock
+summed.
+
+## Floor
+
+The least a Wait lasts before quiet counts as settled (`:at-least-ms`,
+`min_wait_ms` in the dev tool, default 0 in the library and 1000 ms in the
+harness). It answers a command that is silent before it prints. It is the
+model's estimate when given and the harness's default otherwise; the
+harness owns that default, and a rule, a per-command history, or a cheap
+watching model may set it without changing the model's contract.
+
+## Ceiling
+
+The most a Wait lasts (`:timeout-ms`, `expect_ms` in the dev tool, clamped
+to `:terminal-maxima`). Output still flowing at the Ceiling is
+`:timed-out`, which means "still running, here is what printed and where
+it is", never "failed". The Ceiling wins over the Floor.
+
+## Clock
+
+What a result says about time. `:at` is the instant the result was taken,
+on every result that reads a Terminal; `:waited-ms` is how long the Wait
+blocked, summed when a tool call held several; `:since-send-ms`, added by
+the harness, is the time since the last send to that Terminal. The model
+reads the Clock to notice a command that should have finished long ago,
+and gives up on that path instead of waiting again.
+
+## Verdict
+
+A harness's read of a settled Wait: `:running` when it has evidence the
+command is still busy, `:done` when it has evidence it finished,
+`:unknown` when it has neither. Sources: the foreground compared with the
+foreground at send time (`:running` when it differs, `:unknown` when it
+matches, never `:done`; local PTY only, so inside `ssh` it is always
+`:unknown`); completion markers in the Transcript (OSC 133, deferred:
+`:done` with the exit code, reaching wherever the configured shell runs);
+prepl `:ret` frames (later layer). Every source says `:unknown` outside
+its reach; that honesty is what lets one policy serve them all.
+
+## Back-off
+
+Waiting again inside one tool call, from the same mark, with the Floor
+doubled and the remaining Ceiling, while the Verdict is `:running`.
+`:done` and `:unknown` return to the model, which then decides (a
+model-driven wait costs a turn and needs no Verdict). Back-off continues
+across a `terminal_await` given without numbers, from the Floor the last
+Wait used; the model's numbers are the override.
 
 ## Observation
 
 What `await` returns: `{:status :terminal :output :from :mark :foreground
-:truncated? :omitted}`, plus `:exit-code` when `:exited`. `:output` is the
+:at :waited-ms :truncated? :omitted}`, plus `:exit-code` when `:exited`. `:output` is the
 Transcript slice from `:from` to `:mark`, **rendered**: escape sequences
 stripped and carriage-return overwrites resolved within each line, with
 every cut widened to a line boundary before stripping so a split sequence

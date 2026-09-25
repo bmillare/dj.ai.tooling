@@ -214,12 +214,16 @@ a progress spinner), and the model's answer to it is usually `interrupt!`.
 prints nothing for a second, a `[y/N]` prompt, and a returned shell prompt
 look identical to a byte counter. To help the model read the situation,
 every Observation includes `:foreground`, the value of
-`#{pane_current_command}`. Quiet plus `bash` in the foreground is almost
-certainly a prompt; quiet plus `python3` is a REPL or a program waiting on
-stdin; quiet plus `clojure` may be a long compile. That signal is free and
-exact, and it is the first thing to look at before spending a model turn on
-"wait longer". The exact prompt-return signal (`wait-for`) is designed below
-and deferred, so that the general mechanism is exercised first.
+`#{pane_current_command}`. Quiet plus `bash` in the foreground is usually
+a prompt; quiet plus `python3` is a REPL or a program waiting on stdin;
+quiet plus `clojure` may be a long compile. The value is exact, the
+reading of it is not: a pipeline that ends in a shell builtin, a `while
+read` loop, or a `bash -c` child all show `bash` while still running. It
+is still the first thing to look at before spending a model turn on "wait
+longer". How a wait is bounded in time, what a Wait reports about time,
+and how a harness decides to wait again are under Time below; the exact
+completion signal is designed under Planned and deferred, so that the
+general mechanism is exercised first.
 
 ### Observation
 
@@ -230,10 +234,16 @@ and deferred, so that the general mechanism is exercised first.
  :from        41207             ; the mark the model gave
  :mark        41982             ; new mark; the next send! or await starts here
  :foreground  "bash"            ; #{pane_current_command}
+ :at          "2026-09-25T15:21:46.120Z" ; instant the Observation was taken
+ :waited-ms   730               ; how long this Wait blocked
  :truncated?  false
  :omitted     nil               ; {:from :to} raw byte range dropped from the middle
  :exit-code   nil}              ; present when :exited
 ```
+
+`:at` and `:waited-ms` are the Clock (see Time). Every result that reads
+a Terminal carries `:at`, so two results placed side by side show time
+passing even across an approval pause.
 
 `:output` is the raw slice, rendered (see Rendering). When the slice exceeds
 `max-output-bytes`, the head and the tail are kept and the middle is
@@ -257,6 +267,83 @@ person or to the model. `:omitted` is the argument to hand it.
 The rendered text is not clean stdout. It includes the echoed command, the
 prompt, and any redraw the program performed. That is what a person sees and
 it is what the model is told it is seeing.
+
+### Time
+
+Settle knows quiet; it does not know how long is long. Time is given its
+own vocabulary so that the model, the harness, and the library each hold
+the part of it they can be honest about.
+
+A **Wait** is one blocking `await`: it starts at a mark, ends with an
+Observation, and is bounded below by a Floor and above by a Ceiling.
+
+- **Floor** (`:at-least-ms`, default 0): the least a Wait lasts before
+  quiet counts as settled. It is the answer to a command that is silent
+  before it prints. It costs the whole floor on a fast command, which is
+  invisible next to a model round-trip, and it does nothing for a command
+  that goes quiet in the middle unless the floor covers the run.
+- **Ceiling** (`:timeout-ms`): the most a Wait lasts. Output still flowing
+  at the ceiling is `:timed-out`, which means "still running, here is what
+  printed and where it is", never "failed". The ceiling wins over the
+  floor, and a dead pane is reported as soon as it is quiet.
+- **Clock**: what a result says about time. `:at` is the instant it was
+  taken, on every result that reads a Terminal; `:waited-ms` is how long
+  the Wait blocked. A harness that performs several Waits behind one tool
+  call reports the sum as `:waited-ms`, because to the model that was one
+  wait, and adds `:since-send-ms`, the time since the last send to that
+  Terminal, so a follow-up can say how long the command has been running
+  in total. The model reads the Clock to notice that a command that should
+  have finished long ago has not, and to give up on that path rather than
+  wait again; the instructions say so.
+
+The library implements exactly this: a Wait with a Floor, a Ceiling, and a
+Clock, and no opinion about what to do next. Deciding to wait again is the
+harness's, in two forms:
+
+- **Model-driven**: the model asks for another Wait with `terminal_await`.
+  The harness supplies the Floor and Ceiling when the model gives none.
+  This costs a model turn per extra Wait and needs no signal, because the
+  model decides with the output, the foreground, and the Clock in front
+  of it.
+- **Harness-driven**: the harness waits again on its own, inside one tool
+  call, which costs no model turn but needs something to decide with.
+  That something is a **Verdict**: the harness's read of a settled Wait
+  as `:running` (it has evidence the command is still busy), `:done`
+  (it has evidence the command finished), or `:unknown` (it has neither).
+  The harness waits again only on `:running`, with **Back-off**: each
+  further Wait doubles the Floor, until the Verdict changes or the Ceiling
+  is spent. `:done` and `:unknown` return to the model. Back-off without a
+  Verdict would only ever run to the Ceiling, which is why the two are
+  defined together.
+
+A Verdict comes from a source, and every source must be honest about
+`:unknown`; that is what keeps the policy general:
+
+| source | `:running` | `:done` | `:unknown` | reach |
+|---|---|---|---|---|
+| foreground (`#{pane_current_command}`) | differs from the foreground at send time (`sleep`, `make`, `java` after typing at `bash`) | never | equals the foreground at send time | the local PTY only: inside `ssh` the foreground is `ssh` for the whole session, so every Verdict there is `:unknown` and the wait is model-driven |
+| completion markers (OSC 133, Planned) | `C` seen after the mark and no `D` | `D` seen after the mark, with the exit code | no marker after the mark | the configured shell, wherever it runs: markers travel in band, so a remote shell configured to emit them reaches through `ssh` |
+| prepl `:ret` frames (later layer) | an `:out` frame after the mark and no `:ret` | a `:ret` frame after the mark | no frame | a Clojure program on the other end of the connection |
+
+The foreground source is exact as a value and cheap, and it is local. Its
+`:running` is trustworthy, because a foreground that changed is a
+foreground that changed; its `:unknown` is honest, because the same
+foreground can mean a prompt or the same program still busy. A send whose
+purpose is to start a program, such as typing `python3` at `bash`, yields
+`:running` until the Ceiling and comes back `:timed-out` with
+`foreground: python3`, which is a true description of where the Terminal
+is, not a wrong one; the model pays the ceiling once and avoids it by
+stating a small `expect_ms` when it knows it is launching something. The
+marker source is what makes the policy generalize beyond one machine, and
+the prepl source is the same shape for a program rather than a shell.
+Generality is therefore not one signal that works everywhere; it is one
+policy over sources that each say `:unknown` outside their reach, and a
+model that is always given the Clock so that `:unknown` is not the end of
+the story.
+
+Status: Floor and Ceiling are implemented; Clock, Verdict from the
+foreground, and Back-off are the next step; the marker and prepl sources
+are deferred under Planned.
 
 ### Rendering
 
@@ -400,6 +487,16 @@ Terms below become glossary entries; use them and no synonyms.
 - **Settle** / **settled**: quiet for `settle-ms`. (Not: quiescence, idle,
   done, complete. "Done" is exactly what settle does not know.)
 - **Foreground**: the pane's current command. (Not: process, program.)
+- **Wait**: one blocking `await`, bounded by a Floor and a Ceiling. (Not:
+  poll, block, sleep.)
+- **Floor** / **Ceiling**: the least and the most a Wait lasts. (Not:
+  minimum, delay, grace; timeout in prose, deadline, budget.)
+- **Clock**: what a result says about time: `:at`, `:waited-ms`,
+  `:since-send-ms`. (Not: timestamp, elapsed, duration in prose.)
+- **Verdict**: a harness's read of a settled Wait as `:running`, `:done`,
+  or `:unknown`. (Not: evidence, signal, guess, state.)
+- **Back-off**: waiting again with a doubled Floor while the Verdict is
+  `:running`. (Not: retry, polling, exponential in prose.)
 - **Screen**: the rendered viewport. (Not: pane contents, view.)
 - **Stale mark** mirrors **stale basis**: the model acted on something the
   world has moved past.
@@ -429,28 +526,11 @@ Terms below become glossary entries; use them and no synonyms.
 Settle answers "quiet for a moment"; the model wants "the thing I typed is
 done". Those diverge for a command that is silent before it prints, a
 command that goes silent in the middle, and a program that is silent
-because it is waiting for input. v1 ships two heuristics, Settle and the
-floor below, to learn where they hurt in practice. This section designs
-the exact path so that the shape is settled while the evidence is fresh.
-It is deferred, not rejected.
-
-### Floor: `:at-least-ms` (implemented in v1)
-
-`await` takes `:at-least-ms`: `:settled` cannot be reported before that
-much time has passed since the call started, whatever the quiet. It is the
-model's estimate of startup latency, stated per call (`min_wait_ms` in the
-dev tool). It fixes the silent-then-prints case when the estimate is high
-enough, costs the whole floor on a fast command, and does nothing for a
-program that goes quiet mid-run unless the floor covers the run. It is
-cheap, composes with everything below, and is the v1 answer on purpose.
-The floor need not come from the model: the dev tool applies a harness
-default when the model says nothing (`:terminal-defaults`), and that slot
-is where a rule (this command usually starts slow), a per-command history,
-or a cheap local model watching the Transcript would go. That keeps the
-estimate the harness's business and the model's contract unchanged. How
-well each source sets it is one of the things v1 exists to measure. `:timed-out`
-and `:exited` are unaffected: a ceiling still wins and a dead pane is still
-reported as soon as it is quiet.
+because it is waiting for input. v1 ships the heuristics under Time
+(Floor, Back-off on the foreground Verdict) to learn where they hurt in
+practice. This section designs the exact source of a `:done` Verdict so
+that the shape is settled while the evidence is fresh. It is deferred, not
+rejected.
 
 ### Markers in the stream: OSC 133 (preferred exact path)
 
@@ -624,9 +704,28 @@ Tool definitions:
 - `terminal_await(terminal, mark, expect_ms?, min_wait_ms?)`: wait again,
   for a `:timed-out` Observation or after an interrupt.
 
-`min_wait_ms` is the floor from Planned: the model's estimate of how long
-the command is silent before it prints, below which quiet is not taken as
-done. It is clamped to the same ceiling as `expect_ms`.
+`min_wait_ms` is the Floor: the model's estimate of how long the command
+is silent before it prints, below which quiet is not taken as done. It is
+clamped to the same ceiling as `expect_ms`.
+
+**Time policy.** The tool owns the decisions the library refuses to make
+(see Time). Defaults, in `:terminal-defaults`: Floor 1000 ms, Ceiling
+30000 ms (the Desk's `timeout-ms`), Back-off doubling. A send or an await
+is one tool call that may hold several Waits: after a settled Wait the
+tool takes the foreground Verdict against the foreground recorded at the
+send; on `:running` it Waits again from the same mark with twice the
+Floor and the remaining Ceiling; on `:unknown`, `:done`, `:timed-out`, or
+`:exited` it returns. The result's `:waited-ms` is the sum, `:at` is the
+last Wait's, and `:since-send-ms` is measured from the send. Per Terminal
+the tool remembers the foreground at send, the send instant, and the last
+Floor used, so a `terminal_await` with no numbers continues the Back-off
+from where the last Wait left off, and the model's numbers, when given,
+are the override: `min_wait_ms` sets the first Floor of that call and
+`expect_ms` its Ceiling. The policy is a pure function from (Observation,
+Verdict, Floor, time spent, Ceiling) to "return" or "wait again with this
+Floor", tested without tmux, so that a rule set, a per-command history, or
+a cheap watching model can replace it without touching the model's
+contract.
 - `terminal_interrupt(terminal)`, `terminal_screen(terminal)`: unchanged.
 
 `expect_ms` defaults to the Desk's `timeout-ms` and is clamped to the
