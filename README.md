@@ -115,7 +115,8 @@ reply ----parse----> Patches --stage----> Changeset --commit!--> world
 
 `snapshot`, `stage`, and `commit!` perform effects. `render` and `parse` are
 pure representation boundaries. Human or programmatic review belongs between
-`stage` and `commit!`.
+`stage` and `commit!`. Each word in that line has one meaning, given in
+[`doc/glossary.md`](doc/glossary.md).
 
 When `stage` is given the Snapshots the model saw, they become the Changeset's
 basis: Patches are applied against the Snapshot contents rather than a fresh
@@ -148,12 +149,13 @@ basis when committing.
 ;; content validation off:
 (def changeset (edit/stage "." patches nil {:content-validation-rules []}))
 
-;; Review :basis and :changes before choosing to commit.
+;; Review :basis and :changes before choosing to commit. A Changeset is a
+;; value; the Workspace it is committed into is passed alongside it.
 (when (= :ready (:status changeset))
-  (edit/commit! changeset))
+  (edit/commit! "." changeset))
 ```
 
-Patch maps are open: the required `:file`, `:search`, and `:replace` keys are
+Patch maps are open: the required `:path`, `:search`, and `:replace` keys are
 validated and unknown keys are ignored, so consumers can decorate Patches
 flowing through the pipeline. A rejected stage carries every independent
 error (Patches after a failed Patch on the same file are not evaluated), so a
@@ -212,7 +214,7 @@ error.
 
 ## Data contracts
 
-`dj.ai.tooling.specs` describes the Patch, Selector, Snapshot, and Changeset
+`dj.ai.tooling.specs` describes the Selector, Snapshot, Patch, and Changeset
 shapes with `clojure.spec` for documentation, instrumentation, and
 generation. The runtime validation inside `edit` and `observe` does not
 depend on it.

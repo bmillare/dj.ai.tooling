@@ -35,6 +35,89 @@ returns `{:target path}` or `{:error reason}`:
 `dj.ai.tooling.path` holds generic Path operations with no Workspace policy or
 error vocabulary.
 
+## Selector
+
+An open map naming a source to observe. The only scheme today is
+`{:scheme :file :path relative-path}`. Required keys are validated and unknown
+keys are ignored, so a consumer can decorate a Selector and find its
+decoration again on the Snapshot. A Selector's position in a request is its
+`:selector-index`; two Selectors with the same scheme and path are duplicates.
+
+## Snapshot
+
+`{:source selector :content string}`: an immutable capture of a source at one
+moment. `:source` is the Selector that produced it, so a file's identity
+travels with its content. `observe/snapshot` captures Selectors as Snapshots
+and returns them in request order, or rejects the whole request: it checks
+every Selector and the byte limits before reading any content, and nothing is
+ever truncated. `observe/render` turns Snapshots into the text a model sees.
+
+## Patch
+
+`{:path relative-path :search string :replace string}`: one exact-search edit.
+`:search` must occur exactly once in the file's current content; an empty
+`:search` creates the file. Its position in a proposal is its
+`:patch-index`. `edit/parse` reads Patches out of a model reply written in
+the `<edit file=...>` protocol; the protocol's `file` attribute becomes
+`:path`.
+
+## Touched file
+
+A file named by at least one Patch. A Changeset lists touched files in
+first-touched order.
+
+## Basis
+
+The state each touched file was computed from: a map of path to
+`{:existed? bool :before content-or-nil}`. `:existed?` distinguishes a missing
+file from an empty one. The same shape is what `edit/apply-patches` takes and
+what a Changeset carries.
+
+- A **disk basis** is read by `stage` at stage time.
+- A **Snapshot basis** is taken from the Snapshots the model saw. A path
+  outside it is unknown: it can only be created, and editing it is rejected
+  with `:file-not-in-basis`.
+
+A basis may hold more than the touched files; `commit!` compares every entry.
+
+## Changeset
+
+`{:status :ready :basis basis :changes [{:path :after} ...]}`: a staged
+proposal awaiting review. `:changes` holds each touched file's final content
+in first-touched order; `:basis` holds what that content was computed from.
+A Changeset is a value with no Workspace inside it; `commit!` takes the
+Workspace as an argument.
+
+## Stage
+
+Applying ordered Patches to a basis. Each touched file starts from its basis
+entry, and later Patches see earlier replacements. A file whose Patch fails
+becomes a **failed file**: its later Patches are not evaluated and it is not
+content validated. The stage returns a Changeset when every Patch and every
+validator passes, otherwise a rejected result. `edit/stage` performs the I/O
+and `edit/apply-patches` is its pure core.
+
+## Commit
+
+Writing a Changeset into the Workspace by compare-and-set. `edit/commit!`
+first compares every basis entry with the world; if any file has changed, the
+basis is **stale** and the commit is rejected with `:stale-basis` errors
+(`:reason :existence-changed` or `:content-changed`) before anything is
+written. Otherwise the changes are written in order. Nothing else in the
+library writes.
+
+## Result
+
+Every operation returns a map tagged by `:status`: `:snapshotted`, `:ready`,
+`:committed`, or `:rejected`. A rejected result carries every independent
+error in `:errors`. Each error has a `:type`, and where it applies a
+`:reason`, an index (`:selector-index`, `:patch-index`), and a `:path`.
+
+`:path` is the address of a file, relative to the Workspace; "file" is the
+thing at that address. Error keys therefore say `:path`, while error types
+that describe the thing say file: `:file-not-found`, `:file-already-exists`,
+`:file-not-in-basis`.
+
 ## Content validation
 
 Checking a file's final content, as text, before any write. It judges only
@@ -52,11 +135,11 @@ which are never turned into validation results.
 `:content-validation-rules` option. That option takes an ordered vector of
 `{:matches? pred :validators [fn ...]}`. The first rule whose `:matches?`
 accepts a touched file's path runs its validators over that file's final
-content, after all of its Patches apply. A file with a failed Patch is not
-validated. `edit` adds `:type :invalid-content` and `:file` to each error.
-`stage` defaults to `edit/default-validation-rules`, which checks
-Clojure-family files for balanced delimiters. `apply-patches` validates only
-when rules are passed in.
+content, after all of its Patches apply. A failed file is never validated.
+`edit` adds `:type :invalid-content` and `:path` to each error. `stage`
+defaults to `edit/default-validation-rules`, which checks Clojure-family
+files for balanced delimiters. `apply-patches` validates only when rules are
+passed in.
 
 ## Top-level body
 

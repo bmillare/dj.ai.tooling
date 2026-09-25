@@ -85,7 +85,7 @@
                                                 :errors [{:type :search-not-unique}]})))))
 
 (deftest interrupted-stage-does-not-claim-patches-passed
-  (let [feedback (adapter/feedback [{:patch-id "p0" :file "a.txt"}]
+  (let [feedback (adapter/feedback [{:patch-id "p0" :path "a.txt"}]
                                     {:status :rejected :errors [{:type :filesystem-error}]})]
     (is (= :stopped (:status feedback)))
     (is (= [:unevaluated] (mapv :status (:evaluations feedback))))))

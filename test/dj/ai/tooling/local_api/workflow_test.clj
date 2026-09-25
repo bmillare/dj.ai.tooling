@@ -53,7 +53,7 @@
                (mapv #(get % "tool_call_id") (drop 3 (:messages (second @requests))))))
         (is (= "a" (slurp (str (.resolve workspace "a.txt")))))
         (spit (str (.resolve workspace "a.txt")) "external")
-        (is (= :file-changed (-> (edit/commit! (:changeset session)) :errors first :type)))
+        (is (= :stale-basis (-> (edit/commit! workspace (:changeset session)) :errors first :type)))
         (is (= "b" (slurp (str (.resolve workspace "b.txt")))))))))
 
 (deftest whole-proposal-revalidation-exposes-new-failure
@@ -111,9 +111,9 @@
       (let [session (workflow/run! workspace selectors "edit" config
                                    (scripted [(response (edit-call "a" "a.txt" "a" "A"))] (atom [])))]
         (binding [*out* (java.io.StringWriter.)]
-          (is (= :discarded (:status (with-in-str "discard\n" (terminal/review-session! session)))))
+          (is (= :discarded (:status (with-in-str "discard\n" (terminal/review-session! workspace session)))))
           (is (= "a" (slurp (str (.resolve workspace "a.txt")))))
-          (is (= :committed (:status (with-in-str "commit\n" (terminal/review-session! session))))))
+          (is (= :committed (:status (with-in-str "commit\n" (terminal/review-session! workspace session))))))
         (is (= "A" (slurp (str (.resolve workspace "a.txt")))))))))
 
 (deftest partial-repair-keeps-other-failures-pending

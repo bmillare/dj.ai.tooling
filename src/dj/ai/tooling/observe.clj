@@ -1,5 +1,12 @@
 (ns dj.ai.tooling.observe
-  "Bounded snapshots and model-facing rendering."
+  "Bounded whole-file capture and model-facing rendering. Terms are defined
+  in doc/glossary.md.
+
+      Selectors --snapshot--> Snapshots --render--> prompt text
+
+  `snapshot` resolves every Selector through the Workspace, checks the byte
+  limits, and only then reads content, so a rejected capture returns no
+  content at all. `render` is pure."
   (:require [clojure.string :as str]
             [dj.ai.tooling.path :as path]
             [dj.ai.tooling.workspace :as workspace])

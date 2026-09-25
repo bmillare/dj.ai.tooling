@@ -20,7 +20,7 @@
           (is (= :received (:status transport)) (pr-str transport))
           (is (= :accepted (:status accepted)) (pr-str accepted))
           (when (= :accepted (:status accepted))
-            (is (= args (mapv (fn [p] {"file" (:file p) "search" (:search p) "replace" (:replace p)})
+            (is (= args (mapv (fn [p] {"file" (:path p) "search" (:search p) "replace" (:replace p)})
                               (:proposal accepted))))
             (let [feedback (adapter/feedback (:proposal accepted) {:status :ready})
                   replay (into (conj messages (:assistant accepted))

@@ -151,7 +151,7 @@
       (when (and (not (:busy? @state)) (integer? id)
                  (= :ready (get-in @state [:turns id :result :status])))
         (let [result (if commit?
-                       (try (edit/commit! (get-in @state [:turns id :result :changeset]))
+                       (try (edit/commit! (:workspace h) (get-in @state [:turns id :result :changeset]))
                             (catch Exception e {:status :rejected :errors [{:message (.getMessage e)}]}))
                        {:status :discarded})]
           (change! h #(-> %

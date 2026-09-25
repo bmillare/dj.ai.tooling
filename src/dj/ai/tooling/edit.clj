@@ -1,5 +1,22 @@
 (ns dj.ai.tooling.edit
-  "Exact-search file patching with staged compare-and-set commits."
+  "Exact-search file patching, staged against a basis and committed by
+  compare-and-set. Terms are defined in doc/glossary.md.
+
+      model reply ---parse---> Patches
+      Patches + basis --stage--> Changeset | rejected
+      Changeset ---(review)---> commit! ---> world | rejected (stale)
+
+  `parse` is pure. `stage` reads the basis, either from disk or from the
+  Snapshots the model saw, then runs the Patches in order: each touched
+  file starts from its basis and later Patches see earlier replacements.
+  The first failing Patch on a file makes it a failed file, and the file's
+  later Patches are not evaluated. Every other touched file is content
+  validated. The result is a ready Changeset, `{:basis :changes}`, or a
+  rejected result that carries every independent error. `apply-patches` is
+  the I/O-free core of `stage`.
+
+  Only `commit!` writes. It compares every basis entry with the Workspace and
+  writes the changes only if nothing has become stale."
   (:require [clojure.string :as str]
             [dj.ai.tooling.content-validation :as content-validation]
             [dj.ai.tooling.path :as path]
@@ -50,26 +67,27 @@ Rules:
     (if (str/ends-with? s "\n") (subs s 0 (dec (count s))) s)))
 
 (defn parse
-  "Extracts ordered Patches from a model response."
+  "Extracts ordered Patches from a model response. The protocol's `file`
+  attribute becomes the Patch's `:path`."
   [model-response]
-  (mapv (fn [[_ _ file search replace]]
-          {:file file :search (clean-newlines search)
+  (mapv (fn [[_ _ path search replace]]
+          {:path path :search (clean-newlines search)
            :replace (clean-newlines replace)})
         (re-seq edit-pattern model-response)))
 
-(defn- path-error [patch-index file reason]
-  {:type :invalid-path :patch-index patch-index :file file :reason reason})
+(defn- path-error [patch-index path reason]
+  {:type :invalid-path :patch-index patch-index :path path :reason reason})
 
 (defn- invalid-patch [patch-index patch reason]
   {:type :invalid-patch :patch-index patch-index
-   :file (when (map? patch) (:file patch)) :reason reason})
+   :path (when (map? patch) (:path patch)) :reason reason})
 
 (defn- form-error [patch-index patch]
-  (let [{:keys [file search replace]} (when (map? patch) patch)]
+  (let [{:keys [path search replace]} (when (map? patch) patch)]
     (cond
       (not (map? patch)) (invalid-patch patch-index patch :not-a-map)
-      (not (string? file)) (path-error patch-index file :not-a-string)
-      (str/blank? file) (path-error patch-index file :blank)
+      (not (string? path)) (path-error patch-index path :not-a-string)
+      (str/blank? path) (path-error patch-index path :blank)
       (not (string? search)) (invalid-patch patch-index patch :search-not-a-string)
       (not (string? replace)) (invalid-patch patch-index patch :replace-not-a-string))))
 
@@ -78,28 +96,28 @@ Rules:
     (let [index (.indexOf content search from)]
       (if (neg? index) n (recur (inc index) (inc n))))))
 
-(defn- content-step [entry patch-index {:keys [file search replace]}]
+(defn- content-step [entry patch-index {:keys [path search replace]}]
   (cond
     (empty? search)
     (if (:exists? entry)
-      {:error {:type :file-already-exists :patch-index patch-index :file file}}
+      {:error {:type :file-already-exists :patch-index patch-index :path path}}
       {:entry (assoc entry :exists? true :after replace)})
     (:exists? entry)
     (let [content (:after entry)
           matches (match-count content search)]
       (case matches
         0 {:error {:type :search-not-found :patch-index patch-index
-                   :file file :search search}}
+                   :path path :search search}}
         1 {:entry (assoc entry :after (str/replace-first content search replace))}
         {:error {:type :search-not-unique :patch-index patch-index
-                 :file file :search search :match-count matches}}))
+                 :path path :search search :match-count matches}}))
     (:known? entry)
-    {:error {:type :file-not-found :patch-index patch-index :file file}}
+    {:error {:type :file-not-found :patch-index patch-index :path path}}
     :else
-    {:error {:type :file-not-in-basis :patch-index patch-index :file file}}))
+    {:error {:type :file-not-in-basis :patch-index patch-index :path path}}))
 
-(defn- clojure-family-path? [file]
-  (boolean (some #(str/ends-with? file %) [".clj" ".cljs" ".cljc" ".edn"])))
+(defn- clojure-family-path? [path]
+  (boolean (some #(str/ends-with? path %) [".clj" ".cljs" ".cljc" ".edn"])))
 
 (def default-validation-rules
   "The `:content-validation-rules` value `stage` supplies when the option is
@@ -111,74 +129,79 @@ Rules:
     :validators [content-validation/balanced-delimiters]}])
 
 (defn- content-errors
-  "Validates the final content of each successfully patched file against the
-  first matching rule, in first-touched-file order. Files with any failed
-  Patch of their own are poisoned and never validated."
-  [rules entries order poisoned]
+  "Validates the final content of each touched file that is not a failed
+  file against the first matching rule, in first-touched order."
+  [rules entries order failed]
   (into []
         (comp
-         (remove poisoned)
-         (mapcat (fn [file]
-                   (let [after (:after (get entries file))
-                         rule (some #(when ((:matches? %) file) %) rules)]
+         (remove failed)
+         (mapcat (fn [path]
+                   (let [after (:after (get entries path))
+                         rule (some #(when ((:matches? %) path) %) rules)]
                      (for [validator (:validators rule)
                            error (validator after)]
-                       (merge {:type :invalid-content :file file} error))))))
+                       (merge {:type :invalid-content :path path} error))))))
         order))
 
 (defn- stage-entries
   "Runs ordered Patches against entries produced by `lookup`, accumulating
-  every independent error. Patches after a failed Patch on the same file are
-  not evaluated. Files whose Patches all succeed are then content-validated
-  against `rules`; validation errors follow patch errors in the result."
+  every independent error. A file's Patches after its first failed Patch are
+  not evaluated. Touched files that did not fail are then content validated
+  against `rules`; validation errors follow Patch errors in the result."
   [lookup patches rules]
-  (loop [remaining (seq (map-indexed vector patches))
-         entries {} order [] errors [] poisoned #{}]
-    (if-let [[patch-index patch] (first remaining)]
-      (let [error (form-error patch-index patch)
-            file (when (map? patch) (:file patch))]
-        (cond
-          error
-          (recur (next remaining) entries order (conj errors error) poisoned)
-          (contains? poisoned file)
-          (recur (next remaining) entries order errors poisoned)
-          :else
-          (let [known (get entries file)
-                looked-up (when-not known (lookup patch-index file))]
-            (if-let [lookup-error (:error looked-up)]
-              (recur (next remaining) entries order (conj errors lookup-error)
-                     (conj poisoned file))
-              (let [result (content-step (or known (:entry looked-up))
-                                         patch-index patch)]
-                (if-let [content-error (:error result)]
-                  (recur (next remaining) entries order
-                         (conj errors content-error) (conj poisoned file))
-                  (recur (next remaining)
-                         (assoc entries file (:entry result))
-                         (cond-> order (not known) (conj file))
-                         errors poisoned)))))))
-      (let [errors (into errors (content-errors rules entries order poisoned))]
-        (if (seq errors)
-          {:status :rejected :errors errors}
-          {:status :ready
-           :basis (mapv #(select-keys (get entries %) [:file :existed? :before]) order)
-           :changes (mapv #(select-keys (get entries %) [:file :after]) order)})))))
+  (if-not (seq patches)
+    {:status :rejected :errors [{:type :no-patches}]}
+    (loop [remaining (seq (map-indexed vector patches))
+           entries {} order [] errors [] failed #{}]
+      (if-let [[patch-index patch] (first remaining)]
+        (let [error (form-error patch-index patch)
+              path (when (map? patch) (:path patch))]
+          (cond
+            error
+            (recur (next remaining) entries order (conj errors error) failed)
+            (contains? failed path)
+            (recur (next remaining) entries order errors failed)
+            :else
+            (let [known (get entries path)
+                  looked-up (when-not known (lookup patch-index path))]
+              (if-let [lookup-error (:error looked-up)]
+                (recur (next remaining) entries order (conj errors lookup-error)
+                       (conj failed path))
+                (let [result (content-step (or known (:entry looked-up))
+                                           patch-index patch)]
+                  (if-let [content-error (:error result)]
+                    (recur (next remaining) entries order
+                           (conj errors content-error) (conj failed path))
+                    (recur (next remaining)
+                           (assoc entries path (:entry result))
+                           (cond-> order (not known) (conj path))
+                           errors failed)))))))
+        (let [errors (into errors (content-errors rules entries order failed))]
+          (if (seq errors)
+            {:status :rejected :errors errors}
+            {:status :ready
+             :basis (into {}
+                          (map (fn [path]
+                                 [path (select-keys (get entries path)
+                                                    [:existed? :before])]))
+                          order)
+             :changes (mapv #(select-keys (get entries %) [:path :after])
+                            order)}))))))
 
-(defn- basis-entry [basis file]
-  (if-let [{:keys [existed? before]} (get basis file)]
-    {:file file :known? true :existed? (boolean existed?)
+(defn- basis-entry [basis path]
+  (if-let [{:keys [existed? before]} (get basis path)]
+    {:path path :known? true :existed? (boolean existed?)
      :exists? (boolean existed?) :before before :after before}
-    {:file file :known? false :existed? false :exists? false
+    {:path path :known? false :existed? false :exists? false
      :before nil :after nil}))
 
 (defn apply-patches
-  "Pure core: applies ordered Patches against `basis`, a map of file to
-  `{:existed? bool :before content-or-nil}`. Files absent from `basis` are
-  unknown: creation Patches (empty `:search`) assume absence, while edit
-  Patches are rejected with `:file-not-in-basis`. Unknown Patch keys are
-  ignored. Returns `{:status :ready :basis [...] :changes [...]}` (without
-  `:workspace`, so not directly committable) or a rejected result carrying every
-  independent error.
+  "Pure core of `stage`: applies ordered Patches against `basis`, a map of
+  path to `{:existed? bool :before content-or-nil}`. Paths absent from
+  `basis` are unknown: creation Patches (empty `:search`) assume absence,
+  while edit Patches are rejected with `:file-not-in-basis`. Unknown Patch
+  keys are ignored. Returns a ready Changeset or a rejected result carrying
+  every independent error.
 
   Never validates content unless `opts` supplies
   `:content-validation-rules` — an ordered vector of
@@ -186,17 +209,15 @@ Rules:
   `:matches?` accepts a touched file's path runs its `:validators` in
   order over that file's final content; each validator returns zero or
   more `{:reason ... :detail ...}` maps, surfaced as `:invalid-content`
-  errors carrying `:file` but no `:patch-index`. Validator exceptions
+  errors carrying `:path` but no `:patch-index`. Validator exceptions
   propagate."
   ([basis patches] (apply-patches basis patches nil))
   ([basis patches opts]
-   (if-not (seq patches)
-     {:status :rejected :errors [{:type :no-patches}]}
-     (stage-entries (fn [_ file] {:entry (basis-entry basis file)}) patches
-                    (:content-validation-rules opts)))))
+   (stage-entries (fn [_ path] {:entry (basis-entry basis path)}) patches
+                  (:content-validation-rules opts))))
 
 (defn snapshots-basis
-  "Builds an `apply-patches` basis map from observe file Snapshots."
+  "Builds a basis map from observe file Snapshots."
   [snapshots]
   (into {}
         (keep (fn [{:keys [source content]}]
@@ -205,30 +226,28 @@ Rules:
         snapshots))
 
 (defn- checked-lookup [resolve-fn workspace entry-fn]
-  (fn [patch-index file]
-    (let [{:keys [target error]} (resolve-fn workspace file)]
+  (fn [patch-index path]
+    (let [{:keys [target error]} (resolve-fn workspace path)]
       (if error
-        {:error (path-error patch-index file error)}
-        {:entry (entry-fn target file)}))))
-
-(defn- staged [workspace lookup patches rules]
-  (if-not (seq patches)
-    {:status :rejected :errors [{:type :no-patches}]}
-    (let [result (stage-entries lookup patches rules)]
-      (cond-> result
-        (= :ready (:status result)) (assoc :workspace workspace)))))
+        {:error (path-error patch-index path error)}
+        {:entry (entry-fn target path)}))))
 
 (defn stage
-  "Stages ordered file Patches in `workspace` without writing.
+  "Stages ordered Patches in `workspace` without writing.
 
   With `snapshots` nil (or the two-argument arity) the basis is read from
-  disk. Otherwise `snapshots` are observe file Snapshots and become the
-  exact basis the Patches apply against — files outside that basis can
-  only be created, and `commit!` compares the world with the Snapshot
-  contents rather than stage-time reads. Returns a ready Changeset with
-  separate `:basis` and `:changes`, or a rejected result carrying every
-  independent error. Later Patches see earlier changes to the same file;
-  unknown Patch keys are ignored.
+  disk: a disk basis. Otherwise `snapshots` are observe file Snapshots and
+  become the exact basis the Patches apply against: a Snapshot basis. Files
+  outside a Snapshot basis can only be created, and `commit!` compares the
+  world with the Snapshot contents rather than stage-time reads. Returns a
+  ready Changeset or a rejected result carrying every independent error.
+  Later Patches see earlier changes to the same file; unknown Patch keys are
+  ignored.
+
+  A disk basis resolves each path through the Workspace's full check,
+  including symlinks. A Snapshot basis checks paths only lexically; the
+  Snapshots themselves already passed the full check, and `commit!` performs
+  it again.
 
   `opts` supports `:content-validation-rules` (see `apply-patches` for the
   rule shape). Omitted, `default-validation-rules` apply — each touched
@@ -244,49 +263,55 @@ Rules:
          lookup (if snapshots
                   (let [basis (snapshots-basis snapshots)]
                     (checked-lookup workspace/resolve-path-lexically workspace
-                                    (fn [_ file] (basis-entry basis file))))
+                                    (fn [_ path] (basis-entry basis path))))
                   (checked-lookup workspace/resolve-path workspace
-                                  (fn [target file]
+                                  (fn [target path]
                                     (let [present? (path/exists? target)
                                           content (when present?
                                                     (Files/readString target))]
-                                      {:file file :known? true
+                                      {:path path :known? true
                                        :existed? present? :exists? present?
                                        :before content :after content}))))]
-     (staged workspace lookup patches rules))))
+     (stage-entries lookup patches rules))))
 
-(defn- stale-error [^Path workspace {:keys [file existed? before]}]
-  (let [{:keys [target error]} (workspace/resolve-path workspace file)]
+(defn- stale-error [^Path workspace [path {:keys [existed? before]}]]
+  (let [{:keys [target error]} (workspace/resolve-path workspace path)]
     (if error
-      {:type :invalid-path :file file :reason error}
+      {:type :invalid-path :path path :reason error}
       (let [present? (path/exists? target)]
         (cond
           (not= existed? present?)
-          {:type :file-changed :file file :reason :existence-changed}
+          {:type :stale-basis :path path :reason :existence-changed}
           (and present? (not= before (Files/readString target)))
-          {:type :file-changed :file file :reason :content-changed}
+          {:type :stale-basis :path path :reason :content-changed}
           :else nil)))))
 
 (defn commit!
-  "Commits a ready Changeset iff every file still matches its basis."
-  [{:keys [status workspace basis changes]}]
-  (cond
-    (not= :ready status)
-    {:status :rejected
-     :errors [{:type :invalid-changeset :changeset-status status}]}
-    (or (not (instance? Path workspace)) (not (vector? basis))
-        (not (vector? changes))
-        (not= (mapv :file basis) (mapv :file changes)))
-    {:status :rejected
-     :errors [{:type :invalid-changeset :reason :invalid-shape}]}
-    :else
-    (let [errors (into [] (keep #(stale-error workspace %)) basis)]
-      (if (seq errors)
-        {:status :rejected :errors errors}
-        (do
-          (doseq [{:keys [file after]} changes]
-            (let [{:keys [^Path target]} (workspace/resolve-path-lexically workspace file)]
-              (when-let [parent (.getParent target)]
-                (Files/createDirectories parent no-file-attributes))
-              (Files/writeString target after no-open-options)))
-          {:status :committed :changes changes})))))
+  "Writes a ready Changeset into `workspace` iff its basis is still current.
+
+  Every basis entry is compared with the Workspace, in path order, and any
+  mismatch rejects the commit with a `:stale-basis` error before anything
+  is written. The basis may hold entries for files the changes do not touch;
+  they are compared all the same. Changes are then written in order.
+  Returns `{:status :committed :changes [...]}` or a rejected result."
+  [workspace {:keys [status basis changes]}]
+  (let [workspace (path/absolute workspace)]
+    (cond
+      (not= :ready status)
+      {:status :rejected
+       :errors [{:type :invalid-changeset :reason :not-ready :status status}]}
+      (or (not (map? basis)) (not (vector? changes))
+          (not (every? #(contains? basis (:path %)) changes)))
+      {:status :rejected
+       :errors [{:type :invalid-changeset :reason :invalid-shape}]}
+      :else
+      (let [errors (into [] (keep #(stale-error workspace %)) (sort-by key basis))]
+        (if (seq errors)
+          {:status :rejected :errors errors}
+          (do
+            (doseq [{:keys [path after]} changes]
+              (let [{:keys [^Path target]} (workspace/resolve-path-lexically workspace path)]
+                (when-let [parent (.getParent target)]
+                  (Files/createDirectories parent no-file-attributes))
+                (Files/writeString target after no-open-options)))
+            {:status :committed :changes changes}))))))

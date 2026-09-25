@@ -182,13 +182,13 @@
     (Files/writeString path content (make-array java.nio.file.OpenOption 0))
     path))
 
-(defn- print-diff! [{:keys [file before after]}]
+(defn- print-diff! [{:keys [path before after]}]
   (let [old (temp-file "dj-ai-tooling-before-" (or before ""))
         new (temp-file "dj-ai-tooling-after-" after)]
     (try
       (let [{:keys [out err]} (shell/sh "git" "--no-pager" "diff"
                                         "--no-index" "--" (str old) (str new))]
-        (println "file:" file)
+        (println "file:" path)
         (print out)
         (when (seq err) (binding [*out* *err*] (print err))))
       (finally
@@ -199,9 +199,8 @@
   "Displays the diff for an exact staged Changeset."
   [changeset]
   (if (= :ready (:status changeset))
-    (let [basis-by-file (into {} (map (juxt :file identity)) (:basis changeset))]
-      (doseq [{:keys [file] :as change} (:changes changeset)]
-        (print-diff! (merge (get basis-by-file file) change))))
+    (doseq [{:keys [path] :as change} (:changes changeset)]
+      (print-diff! (merge (get-in changeset [:basis path]) change)))
     (println "Rejected:" (pr-str (:errors changeset)))))
 
 (defn- parse-ids [prefix argument]
@@ -339,10 +338,10 @@
         state)
       "commit"
       (if (= :ready (-> state :changeset :status))
-        (let [result (edit/commit! (:changeset state))]
+        (let [result (edit/commit! (:workspace state) (:changeset state))]
           (println (if (= :committed (:status result)) "Committed:" "Rejected:")
                    (pr-str (if (= :committed (:status result))
-                             {:files (mapv :file (:changes result))}
+                             {:files (mapv :path (:changes result))}
                              (:errors result))))
           (cond-> state
             (= :committed (:status result)) (assoc :changeset nil)))

@@ -35,7 +35,7 @@
       {:error {:type :ineligible-revision :call-id call-id :patch-id (get arguments "patch_id")}}
       :else {:call-id call-id
              :patch (merge {:search (get arguments "search") :replace (get arguments "replace")}
-                           (if (= phase :initial) {:file (get arguments "file")}
+                           (if (= phase :initial) {:path (get arguments "file")}
                                {:patch-id (get arguments "patch_id")}))})))
 
 (defn accept-response
@@ -72,15 +72,15 @@
         by-index (into {} (keep #(when (contains? % :patch-index)
                                   [(:patch-index %) %])) errors)
         evaluations
-        (loop [i 0 poisoned #{} out []]
+        (loop [i 0 failed #{} out []]
           (if-let [patch (get proposal i)]
             (let [error (get by-index i)
                   status (cond (some #(= :filesystem-error (:type %)) errors) :unevaluated
                                error :failed
-                               (poisoned (:file patch)) :unevaluated
+                               (failed (:path patch)) :unevaluated
                                :else :passed)]
-              (recur (inc i) (cond-> poisoned error (conj (:file patch)))
-                     (conj out (cond-> {:patch-id (:patch-id patch) :file (:file patch)
+              (recur (inc i) (cond-> failed error (conj (:path patch)))
+                     (conj out (cond-> {:patch-id (:patch-id patch) :path (:path patch)
                                        :status status}
                                  error (assoc :error error)))))
             out))

@@ -10,11 +10,11 @@
 
 (s/def ::relative-path (s/and string? (complement str/blank?)))
 
-;; Patch — one ordered exact-search edit. An empty :search creates :file.
-(s/def ::file ::relative-path)
+;; Patch — one ordered exact-search edit. An empty :search creates :path.
+(s/def ::path ::relative-path)
 (s/def ::search string?)
 (s/def ::replace string?)
-(s/def ::patch (s/keys :req-un [::file ::search ::replace]))
+(s/def ::patch (s/keys :req-un [::path ::search ::replace]))
 (s/def ::patches (s/coll-of ::patch))
 
 ;; Content validation rule — ordered; the first :matches? hit selects the
@@ -27,7 +27,6 @@
 
 ;; Selector — an addressable source to observe.
 (s/def ::scheme #{:file})
-(s/def ::path ::relative-path)
 (s/def ::selector (s/keys :req-un [::scheme ::path]))
 (s/def ::selectors (s/coll-of ::selector))
 
@@ -37,13 +36,13 @@
 (s/def ::snapshot (s/keys :req-un [::source ::content]))
 (s/def ::snapshots (s/coll-of ::snapshot))
 
-;; Changeset — proposed contents plus the basis they were computed from.
+;; Changeset — ordered changes plus the basis they were computed from. The
+;; basis is keyed by path; :changes carries the first-touched order.
 (s/def ::existed? boolean?)
 (s/def ::before (s/nilable string?))
 (s/def ::after string?)
-(s/def ::basis (s/coll-of (s/keys :req-un [::file ::existed? ::before])
-                          :kind vector?))
-(s/def ::changes (s/coll-of (s/keys :req-un [::file ::after]) :kind vector?))
+(s/def ::basis (s/map-of ::path (s/keys :req-un [::existed? ::before])))
+(s/def ::changes (s/coll-of (s/keys :req-un [::path ::after]) :kind vector?))
 
 ;; Results — every operation returns a map tagged by :status.
 (s/def ::status #{:ready :rejected :snapshotted :committed})
