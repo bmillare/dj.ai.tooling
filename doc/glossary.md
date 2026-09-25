@@ -136,7 +136,7 @@ with no Workspace inside it; `commit!` takes the Workspace as an argument.
 
 A Changeset is not a diff. It holds whole before and after states, and a diff
 can be derived from them for review. The deltas are the Patches: staging
-applies them to a basis and settles them into states. The basis is also a
+applies them to a basis and yields states. The basis is also a
 precondition. A diff tool applies hunks to a drifted base as long as their
 context still matches, but a Changeset commits only onto the exact basis it
 was staged against; there is no merge. Applying to a drifted base is what
@@ -275,3 +275,124 @@ included in the trace. Over the model API, the top-level body is the one
 Reserved for its tree meaning: a node with no parent, as in progress-graph
 roots and root nodes in the builder. Don't use it for the Workspace or the
 top-level body.
+
+## The terminal loop
+
+```text
+Desk --open!--> Terminal (Observation, mark 0)
+Observation + text --send!--> :sent | rejected (stale mark)
+Terminal + mark --await--> Observation (:settled | :timed-out | :exited)
+Terminal --interrupt!--> :sent
+```
+
+A Terminal is the stateful counterpart of the stateless `bash` tool: a
+shell that stays open between calls. The design is in
+[`doc/design/terminal.md`](design/terminal.md); it is not implemented yet.
+`open!`, `send!`, `interrupt!`, and `close!` write. `await`, `screen`, and
+`transcript` read. A send is the only write that reaches a running program,
+so it is the approval point; an interrupt only ever stops something and
+needs none.
+
+tmux's words are tmux's: **server**, **session**, **window**, **pane**,
+**target**, **attach**. None of them names a library concept. "Session" in
+particular is never the model-facing thing; that is a Terminal.
+
+## Desk
+
+The tmux session a task's Terminals live in, plus the directory that holds
+their Transcripts: `{:socket-name name :session name :transcript-dir path}`.
+The caller creates it, as the caller supplies the Workspace, and the library
+never picks a default server or session. The socket name selects a tmux
+server dedicated to agents (`tmux -L`), so agent state stays out of the
+operator's own server and teardown is one `kill-server`. Desk pairs with
+Workspace: the Workspace is the directory a task runs against, the Desk is
+where its Terminals run. Transcripts live outside the Workspace so `observe`
+and `edit` never see them.
+
+## Terminal
+
+One PTY the model types into and reads from: one tmux window holding one
+pane, named by the Terminal's name (`main`, `repl`) and targeted internally
+by the pane id (`%N`) captured at creation. The pane id survives renames
+and index shifts and is never shown to the model. In code a Terminal is the value `{:name string :pane-id string
+:transcript path}`. Its processes and its Transcript pipe belong to tmux, so
+a harness restart loses nothing and `terminal/recover` rebuilds the values
+from the live Desk. A Terminal starts with one Observation at mark 0.
+
+## Transcript
+
+The append-only raw record of every byte a Terminal's pane emitted, written
+by tmux `pipe-pane` to one file per Terminal. It holds escape sequences,
+carriage returns, the echo of what was typed, and readline's redraws;
+rendering strips them for the model but the file is never rewritten. It is
+not tmux's history or scrollback, which are bounded and rendered. Reading a
+slice by offset is O(1) at any age.
+
+## Mark
+
+A byte offset into a Transcript. Every Observation ends at a mark, and
+"output since mark" is what the model has not yet seen. `send!` takes the
+mark of the Observation the model acted on and is rejected with
+`:stale-mark` when the Transcript has grown past it: a late-finishing
+program, a background job, or a person typing into the attached pane all
+move the mark. The rejection carries the unseen output as an Observation, so
+a stale send costs one model turn and no extra call. Stale mark mirrors
+stale basis: the mark is the basis of a send. A **forced send**
+(`:force? true`) skips the check for a Terminal whose output never stops
+moving; it still returns the unseen output as `:observation`, so only the
+refusal is waived, and the reviewer sees the flag.
+
+## Send
+
+Typing into a Terminal, in one of two forms. A **paste** delivers text as a
+bracketed paste (tmux `load-buffer -` then `paste-buffer -p`), so a
+multi-line text is one editing unit and one submission; it is followed by
+Enter unless `:submit? false`. **Keys** deliver a vector of tmux key names
+(`["Up" "Enter"]`, `["C-d"]`) for history, end-of-input, and programs that
+draw. Both are shown exactly to the reviewer and run only after approval.
+`send-keys -l` with embedded newlines is never used, because each newline
+would submit a line.
+
+## Settle
+
+The wait condition: no new Transcript bytes for `settle-ms`, measured from
+the later of the call's start and the last byte. `await` returns
+`:settled` on it, `:timed-out` when `timeout-ms` passes with output still
+flowing, and `:exited` when the pane is dead. A silent Terminal settles
+with empty output. Settle is a heuristic and never means "done": a quiet
+prompt, a program waiting on stdin, and a slow computation look the same to
+it. The Observation's **foreground**, tmux's `#{pane_current_command}`, is
+the exact signal that tells them apart most of the time, and the model
+reads it before deciding to wait longer. An exact prompt-return signal
+(`tmux wait-for`) is designed and deferred.
+
+## Observation
+
+What `await` returns: `{:status :terminal :output :from :mark :foreground
+:truncated? :omitted}`, plus `:exit-code` when `:exited`. `:output` is the
+Transcript slice from `:from` to `:mark`, **rendered**: escape sequences
+stripped and carriage-return overwrites resolved within each line, with
+every cut widened to a line boundary before stripping so a split sequence
+is never misread as text. It is what a person would see, echo and prompt
+included, not clean stdout. When the slice exceeds `max-output-bytes` the
+head and the tail are kept and the middle is dropped: `:truncated?` is set,
+`:omitted` names the dropped raw byte range, a marker line stands in for it
+in the text, and `:mark` still advances to the end so nothing is shown
+twice. The dropped bytes remain in the Transcript and `terminal/transcript`
+reads them by range. Observation is the only shape the model reads from a
+Terminal; the tmux target never appears in it.
+
+## Interrupt
+
+The `C-c` key sent to a Terminal. tmux writes `0x03` to the PTY and the line
+discipline delivers `SIGINT` to the foreground process group, as a person's
+Ctrl-C does. It needs no approval. It moves the Transcript like any send.
+It cannot reach a program behind a socket client such as `nc`; that is a
+prepl-layer concern.
+
+## Screen
+
+The rendered viewport of a Terminal's pane (`capture-pane -p -J`), joined
+across wrapped lines. Two-dimensional and width dependent, it is the right
+view of a program that draws rather than prints. It carries no mark and
+moves none; the Transcript remains the record.
