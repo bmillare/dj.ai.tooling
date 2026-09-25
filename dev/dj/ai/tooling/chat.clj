@@ -66,8 +66,8 @@
         index (count (get-in @(:state h) [:turns turn-id :commands]))]
     (change! h update-in [:turns turn-id :commands] (fnil conj [])
              {:proposal proposal :decision decision :status :approval})
-    (let [approved? @decision
-          result (if approved? (bash/execute! proposal) {:status :denied :executed false})]
+    (let [decision @decision
+          result (if (= :approved decision) (bash/execute! proposal) {:status :denied :executed false})]
       (change! h update-in [:turns turn-id :commands index]
                #(-> % (dissoc :decision) (assoc :status (:status result) :result result)))
       result)))
@@ -100,35 +100,44 @@
   (into {} (map (fn [[name entry]] [name (:terminal entry)])) (:terminals @state)))
 
 (defn approve-terminal-send!
-  "Publish a frozen send proposal and park only the model worker, as
-  `approve-command!` does for Bash. The send is performed after approval and
-  the Terminals panel is refreshed either way."
-  [{:keys [desk] :as h} turn-id proposal]
+  "Publish a frozen send proposal and park only its worker thread, as
+  `approve-command!` does for Bash. Several proposals may be pending at
+  once; each is decided on its own. An approved send is performed and
+  awaited, a denied one returns `:denied` and the task continues, and a
+  stop returns `:stopped`. The Terminals panel is refreshed either way."
+  [{:keys [desk state] :as h} turn-id proposal]
   (let [decision (promise)
-        index (count (get-in @(:state h) [:turns turn-id :commands]))
-        terminal (get (terminals h) (:terminal proposal))]
-    (change! h update-in [:turns turn-id :commands] (fnil conj [])
-             {:kind :terminal :proposal proposal :decision decision :status :approval})
-    (let [approved? @decision
-          result (if approved?
-                   (terminal-tool/perform! desk terminal proposal)
+        terminal (get (terminals h) (:terminal proposal))
+        index (locking state
+                (let [index (count (get-in @state [:turns turn-id :commands]))]
+                  (change! h update-in [:turns turn-id :commands] (fnil conj [])
+                           {:kind :terminal :proposal proposal :decision decision :status :approval})
+                  index))]
+    (let [decision @decision
+          result (case decision
+                   :approved (terminal-tool/perform! desk terminal proposal)
+                   :stopped {:status :stopped :executed false}
                    {:status :denied :executed false})]
       (change! h update-in [:turns turn-id :commands index]
                #(-> % (dissoc :decision) (assoc :status (:status result) :result result)))
       (refresh-terminal! h terminal)
       result)))
 
-(defn decide-command! [{:keys [state] :as h} proposal-id approved?]
-  (locking state
-    (when-let [[turn-id command-id command]
-               (first (for [turn (:turns @state)
-                            [i command] (map-indexed vector (:commands turn))
-                            :when (and (= :approval (:status command))
-                                       (= proposal-id (get-in command [:proposal :id])))]
-                        [(:id turn) i command]))]
-      (change! h assoc-in [:turns turn-id :commands command-id :status]
-               (if approved? :running :denied))
-      (deliver (:decision command) approved?)))
+(defn decide-command!
+  "Consumes one pending proposal's decision: `:approved`, `:denied`, or
+  `:stopped` (a boolean is read as approved or denied)."
+  [{:keys [state] :as h} proposal-id decision]
+  (let [decision (case decision (true :approved) :approved :stopped :stopped :denied)]
+    (locking state
+      (when-let [[turn-id command-id command]
+                 (first (for [turn (:turns @state)
+                              [i command] (map-indexed vector (:commands turn))
+                              :when (and (= :approval (:status command))
+                                         (= proposal-id (get-in command [:proposal :id])))]
+                          [(:id turn) i command]))]
+        (change! h assoc-in [:turns turn-id :commands command-id :status]
+                 (case decision :approved :running :stopped :stopped :denied))
+        (deliver (:decision command) decision))))
   {:status 204})
 
 (defn- run-terminal-task! [{:keys [desk] :as h} id task config traced!]
@@ -177,6 +186,9 @@
                   :resolved (str "Resolved text (not executed):\n" (get-in result [:state :result :final]))
                   :ready "An edit proposal is staged, awaiting human review."
                   :denied "The human denied the proposed command; this task stopped."
+                  :stopped (if (= :stopped-by-human (get-in result [:errors 0 :type]))
+                             "The human stopped this task at a Terminal send."
+                             (str "Stopped: " (pr-str (:errors result))))
                   (str "Stopped: " (pr-str (:errors result))))
         diff (when (= :ready (:status result))
                (try (with-out-str (dogfood/review! (:changeset result)))
@@ -251,23 +263,30 @@
 (defn- inspect [id title value]
   [:details {:id id :data-preserve-attr "open"} [:summary title] [:pre (pretty value)]])
 
+(defn- observation-view [title {:keys [from mark foreground exit-code truncated? output]}]
+  [:div [:p (str title " · marks " from ".." mark " · foreground: " foreground
+                 (when exit-code (str " · exit " exit-code)) (when truncated? " · truncated"))]
+   [:pre output]])
+
 (defn- terminal-command-view [{:keys [proposal status result]}]
-  (let [{:keys [id terminal form text keys mark force? foreground alive?]} proposal]
+  (let [{:keys [id terminal form text keys mark expect-ms force? foreground alive?]} proposal]
     [:section {:id (str "command-" id) :class "command"}
      [:p {:class "badge"} (str "Terminal " terminal " · " (name form) " · " (name status))]
      [:small {:class "muted"} (str "foreground: " foreground (when-not alive? " (exited)") " · mark " mark
+                                  " · expect " (or expect-ms "default") " ms"
                                   (when force? " · forced: sends past unseen output"))]
      [:pre (if (= :paste form) text (str/join " " keys))]
      (when (= :approval status)
        [:div {:class "actions"}
         [:button {"data-on:click" (str "@post('/run-command?id=" id "')")} "Send"]
-        [:button {:class "secondary" "data-on:click" (str "@post('/deny-command?id=" id "')")} "Deny"]])
+        [:button {:class "secondary" "data-on:click" (str "@post('/deny-command?id=" id "')")} "Deny"]
+        [:button {:class "secondary" "data-on:click" (str "@post('/stop-command?id=" id "')")} "Stop task"]])
      (when result
        [:div
-        (when-let [observation (or (:observation result) (get-in result [:errors 0 :observation]))]
-          [:div [:p (str "Unseen output since mark " (:from observation)
-                         (when (:truncated? observation) " · truncated"))]
-           [:pre (:output observation)]])
+        (when (:stepped-over result) (observation-view "Stepped over" (:stepped-over result)))
+        (when (contains? result :output) (observation-view (str "Result · " (name (:status result))) result))
+        (when-let [observation (get-in result [:errors 0 :observation])]
+          (observation-view "Unseen output" observation))
         (when (:errors result) [:pre (pretty (:errors result))])])]))
 
 (defn- bash-command-view [{:keys [proposal status result]}]
@@ -316,6 +335,7 @@
                                                    "Waiting for command approval…" "Working…")])
     (map command-view commands)
     (when (= :denied (:status result)) [:p "Command denied. Task stopped."])
+    (when (= :stopped-by-human (get-in result [:errors 0 :type])) [:p "Task stopped at a Terminal send."])
     (when-let [answer (:answer result)]
       (let [{:keys [html error]} (md/render answer)]
         [:div {:class "markdown"}
@@ -411,6 +431,7 @@
         [:post "/new"] (new-chat! h)
         [:post "/run-command"] (decide-command! h (get-in request [:query-params "id"]) true)
         [:post "/deny-command"] (decide-command! h (get-in request [:query-params "id"]) false)
+        [:post "/stop-command"] (decide-command! h (get-in request [:query-params "id"]) :stopped)
         [:post "/commit"] (review! h (get-in request [:query-params "id"]) true)
         [:post "/discard"] (review! h (get-in request [:query-params "id"]) false)
         response/not-found)

@@ -336,8 +336,9 @@ Choose **Bash** under Tools in Chat to let the model compose commands with paylo
 references. Each resolved script waits for **Run / Deny**; execution results
 return to the model for continuation. Commands have finite time and output limits.
 Choose **Terminal** to give the model a persistent tmux shell instead; each send
-waits for **Send / Deny**, and a Terminals panel shows every Terminal's screen
-and the command to attach to it.
+states how long the model expects it to take, waits for **Send / Deny / Stop
+task**, and returns what printed. A Terminals panel shows every Terminal's
+screen and the command to attach to it.
 
 ```bash
 nix develop --command clojure -M:chat

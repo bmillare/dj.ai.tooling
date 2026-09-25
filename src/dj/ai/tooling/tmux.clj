@@ -118,6 +118,9 @@
   [socket-name buffer pane-id]
   (run socket-name ["paste-buffer" "-p" "-d" "-b" buffer "-t" pane-id]))
 
+(defn delete-buffer! [socket-name buffer]
+  (run socket-name ["delete-buffer" "-b" buffer]))
+
 (defn pipe-pane!
   "Starts piping the pane's output into `shell-command` unless a pipe is
   already open (`-o`)."

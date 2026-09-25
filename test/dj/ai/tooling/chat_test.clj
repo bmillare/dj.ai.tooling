@@ -148,31 +148,55 @@
           (is (false? (get-in turn [:commands 0 :result :executed]))))
         (is (= 3 @n))))))
 
-(deftest terminal-sends-wait-for-approval-and-the-panel-shows-the-screen
+(deftest terminal-sends-are-approved-independently-and-the-panel-shows-the-screen
   (if-not (tmux/available?)
-    (println "skipping terminal-sends-wait-for-approval-and-the-panel-shows-the-screen: tmux is not installed")
+    (println "skipping terminal-sends-are-approved-independently-and-the-panel-shows-the-screen: tmux is not installed")
     (let [n (atom 0)
           h (chat/harness "." chat/default-config
                           (fn [_ _ _]
                             (case (swap! n inc)
-                              1 (response nil (call "s" "terminal_send" {"terminal" "main" "text" "echo panel" "mark" 0 "force" true}))
-                              2 (response nil (call "w" "terminal_await" {"terminal" "main" "mark" 0}))
+                              1 (response nil (call "s" "terminal_send" {"terminal" "main" "text" "echo panel" "mark" 0 "force" true "expect_ms" 2000})
+                                          (call "t" "terminal_send" {"terminal" "main" "text" "echo second" "mark" 0})
+                                          (call "x" "terminal_screen" {"terminal" "main"}))
+                              2 (response nil (call "d" "terminal_send" {"terminal" "main" "text" "echo denied" "mark" 0 "force" true}))
                               (response "Printed"))))]
       (try
         (chat/send! h {:mode "chat" :task "Echo" :tools "terminal"})
         (let [command (await-approval h)]
           (is (= :terminal (:kind command)))
           (is (= "echo panel" (get-in command [:proposal :text])))
+          (is (= 2000 (get-in command [:proposal :expect-ms])))
           (is (str/includes? (chat/page h) "forced: sends past unseen output"))
           (is (str/includes? (chat/page h) "tmux -L dj-ai attach -t "))
           (chat/decide-command! h (get-in command [:proposal :id]) true)
+          (let [denied (await-approval h)]
+            (is (= "echo denied" (get-in denied [:proposal :text])))
+            (chat/decide-command! h (get-in denied [:proposal :id]) false))
           (let [turn (await-idle h)]
-            (is (= :answer (get-in turn [:result :status])))
-            (is (= :sent (get-in turn [:commands 0 :result :status])))
+            (is (= :answer (get-in turn [:result :status])) "a denial does not stop the task")
+            (is (= :settled (get-in turn [:commands 0 :result :status])))
             (is (true? (get-in turn [:commands 0 :result :forced?])))
-            (is (= "You · chat + Terminal" (re-find #"You · chat \+ Terminal" (chat/page h))))
+            (is (str/includes? (get-in turn [:commands 0 :result :output]) "\npanel\n"))
+            (is (= :denied (get-in turn [:commands 1 :result :status])))
+            (is (= ["s" "t" "x"] (mapv #(get % "tool_call_id") (take 3 (filter #(= "tool" (get % "role")) (get-in turn [:result :messages]))))))
+            (is (str/includes? (get (nth (get-in turn [:result :messages]) 4) "content") "one-send-per-terminal"))
+            (is (re-find #"You · chat \+ Terminal" (chat/page h)))
             (is (re-find #"(?m)^panel$" (chat/page h)) "the Terminals panel shows the screen")
             (is (= 3 @n))))
         (chat/new-chat! h)
         (is (= 1 (count (:terminals @(:state h)))) "Terminals outlive the chat")
+        (finally (chat/close-terminals! h))))))
+
+(deftest stop-task-ends-a-terminal-task-after-its-results
+  (if-not (tmux/available?)
+    (println "skipping stop-task-ends-a-terminal-task-after-its-results: tmux is not installed")
+    (let [h (chat/harness "." chat/default-config
+                          (fn [_ _ _] (response nil (call "s" "terminal_send" {"terminal" "main" "text" "echo never" "mark" 0 "force" true}))))]
+      (try
+        (chat/send! h {:mode "chat" :task "Echo" :tools "terminal"})
+        (chat/decide-command! h (get-in (await-approval h) [:proposal :id]) :stopped)
+        (let [turn (await-idle h)]
+          (is (= :stopped (get-in turn [:result :status])))
+          (is (= :stopped-by-human (get-in turn [:result :errors 0 :type])))
+          (is (str/includes? (chat/page h) "Task stopped at a Terminal send.")))
         (finally (chat/close-terminals! h))))))

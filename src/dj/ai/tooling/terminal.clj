@@ -36,8 +36,6 @@
   line boundary."
   4096)
 
-(def ^:private paste-buffer "dj-ai-tooling-send")
-
 (defn checked-limits
   "Merges `overrides` over `default-limits` and checks every value is a
   positive finite integer. Throws on a caller error."
@@ -301,10 +299,15 @@
   unless `:submit?` is false. Keys: `send-keys`."
   [{:keys [socket-name]} {:keys [pane-id]} {:keys [text keys submit?]}]
   (if text
-    (or (:error (tmux/load-buffer! socket-name paste-buffer text))
-        (:error (tmux/paste-buffer! socket-name paste-buffer pane-id))
-        (when-not (false? submit?)
-          (:error (tmux/send-keys! socket-name pane-id ["Enter"]))))
+    ;; One buffer per send: tmux buffers are server-wide, so concurrent
+    ;; sends to different Terminals must not share a name.
+    (let [buffer (str "dj-ai-tooling-" (random-uuid))]
+      (or (:error (tmux/load-buffer! socket-name buffer text))
+          (when-let [error (:error (tmux/paste-buffer! socket-name buffer pane-id))]
+            (tmux/delete-buffer! socket-name buffer)
+            error)
+          (when-not (false? submit?)
+            (:error (tmux/send-keys! socket-name pane-id ["Enter"])))))
     (:error (tmux/send-keys! socket-name pane-id keys))))
 
 (defn send!

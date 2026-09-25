@@ -540,18 +540,61 @@ Tests, in the existing kebab-sentence style:
 
 ### 4. Dev harness tool
 
-`dev/dj/ai/tooling/terminal_tool.clj`, beside `bash.clj`. Tool definitions:
-`terminal_send(terminal, text, mark, force?)`,
-`terminal_keys(terminal, keys, mark, force?)`,
-`terminal_await(terminal, mark, settle_ms?, timeout_ms?)`,
-`terminal_interrupt(terminal)`, `terminal_screen(terminal)`. Send and keys go
-through the same approval path as `bash`: the UI shows the Terminal name,
-the exact text or key list, the foreground command, and whether the send is
-forced, and runs only after approval. Instructions text tells the model that
-Settle is a heuristic, what `:foreground` means, that a stale rejection
-contains what it needs, when `force` is the right answer to a stale
-rejection and what the better fix is, and that a truncated Observation
-names the omitted range.
+`dev/dj/ai/tooling/terminal_tool.clj`, beside `bash.clj`. Revised after the
+first implementation: a send that returned only "sent" cost the model a
+turn to ask for the output it obviously wanted, and a response limited to
+one call made a multi-Terminal plan cost a turn per step. The tool now
+encodes the generic intent, "type this and expect it to finish in about
+this long; if it does not, show me where it is and I will decide".
+
+Tool definitions:
+
+- `terminal_send(terminal, text, mark, expect_ms?, force?)` and
+  `terminal_keys(terminal, keys, mark, expect_ms?, force?)`: after human
+  approval, send and then `await` from the sent mark with `expect_ms` as
+  the timeout, and return that Observation. `:settled` is "finished as far
+  as quiet can tell"; `:timed-out` is "still running, here is what printed
+  and where it is" and carries the mark for a later `terminal_await`;
+  `:exited` carries the exit code. A stale mark is rejected as before. A
+  forced send's Observation carries the stepped-over output as
+  `:stepped-over`. Settle stays a harness constant: it is a property of the
+  pipe, not of the model's intent.
+- `terminal_await(terminal, mark, expect_ms?)`: wait again, for a
+  `:timed-out` Observation or after an interrupt.
+- `terminal_interrupt(terminal)`, `terminal_screen(terminal)`: unchanged.
+
+`expect_ms` defaults to the Desk's `timeout-ms` and is clamped to the
+harness ceiling (`:terminal-maxima`); it never exceeds what the operator
+allowed.
+
+**Several calls per response.** A response may carry any number of calls.
+The harness runs them concurrently, one future each, and the next request
+carries one tool result per call in call order. That is the model's wake:
+the request starts when every call has settled, timed out on its own
+`expect_ms`, exited, or been denied. Slow calls therefore come back as
+`:timed-out` with a mark rather than holding the others. The rule that
+keeps marks honest: **one send per Terminal per response**. A second send
+to the same Terminal in one response is rejected with
+`:one-send-per-terminal` as its own tool result (the response is not
+stopped), because it would be typed into whatever the first left running
+and its mark is stale by construction. A sequence for one Terminal is one
+multi-line paste. Sends to different Terminals are independent.
+
+**Independent approval.** Each send is its own frozen proposal with the
+Terminal name, the exact text or key list, the mark, `expect_ms`, the
+foreground command, and whether it is forced. The human decides each
+proposal separately, and an approved send starts the moment it is
+approved, not when every decision is in. **Deny** produces a `:denied`
+tool result for that call and the task continues; the model sees which
+part of its plan was refused and re-plans. **Stop task** is a separate
+decision that also stops the task after this response's results are
+collected. This differs from the Bash tool, where denial stops the task.
+
+Instructions text tells the model that Settle is a heuristic, what
+`:foreground` means, what `expect_ms` buys it, that a stale rejection
+contains what it needs, when `force` is the right answer and what the
+better fix is, that it may issue several calls at once but only one send
+per Terminal, and that a truncated Observation names the omitted range.
 
 One Terminal named `main` is opened on the harness's first Terminal task,
 so v1 needs no open tool and no tmux vocabulary in the prompt. The chat
@@ -560,6 +603,7 @@ foreground, and the attach command; Terminals belong to the harness and
 survive "New chat". Tools are chosen with a select (None, Bash, Terminal)
 rather than a checkbox. The tool loop has no payload definitions: a paste
 carries the text raw, so the quoting problem payloads solve does not arise.
+The turn budget counts responses, not calls.
 
 ### 5. Docs
 

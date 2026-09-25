@@ -40,8 +40,9 @@ access.
   print 2 ** 10, then quit.` The first Terminal task opens a Terminal named
   `main` in the workspace; a **Terminals** panel above the composer shows its
   screen, foreground program, and the `tmux attach` command. Each send shows
-  the exact text or key list, the foreground program, and whether the send is
-  forced, and waits for **Send / Deny**. Waits, interrupts, and screen
+  the exact text or key list, the foreground program, the expected duration,
+  and whether the send is forced, and waits for **Send / Deny / Stop task**;
+  the result under it is what printed. Waits, interrupts, and screen
   captures run without approval. Terminals outlive **New chat**.
 - **Payload:** ask: `Define greeting as text with body Hello tooling. Resolve
   JSON with body {"greeting": {{greeting}}}.` The result displays exact final
@@ -119,12 +120,17 @@ including requests on both sides of approval pauses.
 ## Terminal contract
 
 `dev/dj/ai/tooling/terminal_tool.clj` advertises `terminal_send(terminal,
-text, mark, force)`, `terminal_keys(terminal, keys, mark, force)`,
-`terminal_await(terminal, mark, settle_ms, timeout_ms)`,
+text, mark, expect_ms, force)`, `terminal_keys(terminal, keys, mark,
+expect_ms, force)`, `terminal_await(terminal, mark, expect_ms)`,
 `terminal_interrupt(terminal)`, and `terminal_screen(terminal)` over
 `dj.ai.tooling.terminal`, whose contract is [the Terminal
-design](terminal.md). A response may contain at most one terminal call;
-arguments are validated atomically and an invalid response stops the task.
+design](terminal.md). A send is approved, performed, and then awaited for
+`expect_ms`; its result is the Observation (`settled`, `timed-out` with the
+mark to await again, or `exited`). A response may carry several calls,
+which run concurrently and return one result each in call order, with one
+send per Terminal per response; a second send to the same Terminal gets a
+`one-send-per-terminal` result. Every call's arguments are validated
+atomically and an invalid response stops the task.
 
 Each harness owns one Desk: tmux server `dj-ai`, a session named
 `chat-<id>`, transcripts under the system temp directory. The Terminal
@@ -132,18 +138,21 @@ Each harness owns one Desk: tmux server `dj-ai`, a session named
 working directory, and is closed on shutdown. `:terminal-limits` are the
 library defaults (`settle-ms 500`, `timeout-ms 30000`, `poll-ms 50`,
 `max-output-bytes 65536`, `max-send-bytes 65536`); `:terminal-maxima`
-(`settle-ms 5000`, `timeout-ms 120000`) cap what a model may ask for per
-wait.
+(`expect-ms 120000`) caps what a model may ask for per wait, and an
+omitted `expect_ms` means the Desk's `timeout-ms`.
 
-Sends and keys go through the same approval path as Bash: the frozen
-proposal carries the exact text or keys, the mark, the forced flag, and the
-Terminal's foreground program at proposal time; the worker parks until the
-server consumes the decision once. Approval performs the send, which can
-still be rejected as stale when the Terminal printed since the mark and the
-send was not forced; the rejection and any forced send carry the unseen
-output to the model and to the page. Denial produces a native tool result
-and stops the task. The Terminals panel is refreshed after every send and at
-the end of every Terminal task.
+Sends and keys go through the same approval mechanism as Bash, decided
+independently: each frozen proposal carries the exact text or keys, the
+mark, `expect_ms`, the forced flag, and the Terminal's foreground program
+at proposal time; its worker thread parks until the server consumes that
+decision once, and several proposals may be pending at the same time.
+**Send** performs the send the moment it is clicked, which can still be
+rejected as stale when the Terminal printed since the mark and the send was
+not forced; the rejection and any forced send carry the unseen output to
+the model and to the page. **Deny** produces a native `denied` tool result
+and the task continues, unlike Bash. **Stop task** also ends the task once
+the response's other calls have returned. The Terminals panel is refreshed
+after every send and at the end of every Terminal task.
 
 ## dj.web shape
 
