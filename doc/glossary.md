@@ -88,6 +88,17 @@ in first-touched order; `:basis` holds what that content was computed from.
 A Changeset is a value with no Workspace inside it; `commit!` takes the
 Workspace as an argument.
 
+A Changeset is not a diff. It holds whole before and after states, and a diff
+can be derived from them for review. The deltas are the Patches: staging
+applies them to a basis and settles them into states. The basis is also a
+precondition. A diff tool applies hunks to a drifted base as long as their
+context still matches, but a Changeset commits only onto the exact basis it
+was staged against; there is no merge. In git terms, a Changeset is closer to
+a commit restricted to the touched files, with its parent, and `commit!` is
+closer to an atomic ref update such as `git update-ref new old`. Every
+`:after` is content, so a Changeset can create and modify files but not
+delete them.
+
 ## Stage
 
 Applying ordered Patches to a basis. Each touched file starts from its basis
