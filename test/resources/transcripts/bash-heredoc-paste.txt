@@ -1,0 +1,26 @@
+bash-5.3$ PROMPT_COMMAND='tmux -L probe1856916 wait-for -S p'; PS1='$ '
+$ python3 -q -i <<EOF
+for i in range(2):
+    print("row", i)
+
+print("done")
+EOF
+python3 -q -i <<EOF
+for i in range(2):
+    print("row", i)
+
+print("done")
+EOF
+
+>>> ... ... row 0
+row 1
+>>> done
+>>> 
+$ sleep 1; echo one
+echo two
+sleep 1; echo one
+echo two
+
+one
+two
+$ 

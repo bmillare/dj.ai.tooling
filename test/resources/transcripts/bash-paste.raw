@@ -1,0 +1,9 @@
+[?2004hbash-5.3$ PS1='$ '
+[?2004l[?2004h$ [3mecho one[23m
+[3mecho two[23m
+MM[C[Cecho one
+echo two
+M
+[?2004lone
+two
+[?2004h$ 

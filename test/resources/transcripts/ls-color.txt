@@ -1,0 +1,7 @@
+bash-5.3$ PS1='$ '
+$ ls --color=always /
+ls --color=always /
+
+bin   dev  home  lib64       mnt  opt   root  sbin  sys  usr
+boot  etc  lib   lost+found  nix  proc  run   srv   tmp  var
+$ 

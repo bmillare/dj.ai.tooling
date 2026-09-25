@@ -1,0 +1,28 @@
+bash-5.3$ PS1='$ '
+$ cd /home/bmillare/projects2/pi.agent.research.workspace/dj.ai.tooling/test/resources/transcripts/../../.. && git --no-pager log --oneline -3 && git log --oneline -20
+cd /home/bmillare/projects2/pi.agent.research.workspace/dj.ai.tooling/test/resources/transcripts/../../.. && git --no-pager log --oneline -3 && git log --oneline -20
+
+b6a9253 (HEAD -> master) Design Terminal: tmux-backed session tool with Settle, marks, and rendering
+34dae99 (origin/master, origin/HEAD) Add Rebase: restage a stale Changeset's proposal on the current disk
+e69798a Glossary: distinguish Changeset from a diff
+b6a9253 (HEAD -> master) Design Terminal: tmux-backed session tool with Settle, marks, and rendering
+34dae99 (origin/master, origin/HEAD) Add Rebase: restage a stale Changeset's proposal on the current disk
+e69798a Glossary: distinguish Changeset from a diff
+4a916ae Settle observe/edit vocabulary; basis as map; commit! takes workspace
+8c4c3a2 Rename root to workspace/top-level; split path policy; add bash tool
+fddcae5 add chat dev harness
+0281ba8 Add local API editing and standalone payload resolution
+2ab14d4 idiomatic pass
+d45a500 builder: enlarge node spawn composer
+2c5299f builder: gzip initial page response
+92b2e70 Render only server-projected graph views
+f973b96 Keep graph builder rendering linear
+b8d49a1 builder: render node bodies as markdown
+e1a60bd builder: move all lens controls into top filter bar
+2263f7c Importer hardening from first live import: entry-scoped tag errors, skip precedence, public edit-body!
+36b76fb Add watson-entry importer: tagged no-escape format, atomic per-entry import
+f3a7984 Root form defaults to brent-work; layer lenses narrow the frontier inboxes
+1634846 Add guarded relayering: progress/set-layer + builder relayer!
+793f670 Layers slice 2: builder UI layer lens, layer picker, prefix-stripped aliases
+44563a6 Layers slice 1: :layer attribute + layer-scoped qualified aliases
+$ q

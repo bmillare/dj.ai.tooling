@@ -1,0 +1,18 @@
+bash-5.3$ PS1='$ '
+$ python3 -q
+python3 -q
+
+>>> 
+>>> exec("for i in range(2):\n    print(\"row\", i)")... 
+row 0
+row 1
+>>> 
+>>> 1/0... 
+Traceback (most recent call last):
+  File "<python-input-1>", line 1, in <module>
+    1/0
+    ~^~
+ZeroDivisionError: division by zero
+>>> 
+>>> quit()... 
+$ 

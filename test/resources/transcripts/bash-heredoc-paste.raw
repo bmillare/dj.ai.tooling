@@ -1,0 +1,26 @@
+[?2004hbash-5.3$ PROMPT_COMMAND='tmux -L probe1856916 wait-for -S p'; PS1='$ '
+[?2004l[?2004h$ [3mpython3 -q -i <<EOF[23m
+[3mfor i in range(2):[23m
+[3m    print("row", i)[23m
+
+[3mprint("done")[23m
+[3mEOF[23m
+MMMMMM[C[Cpython3 -q -i <<EOF
+for i in range(2):
+    print("row", i)
+
+print("done")
+EOF
+M
+[?2004l>>> ... ... row 0
+row 1
+>>> done
+>>> 
+[?2004h$ [3msleep 1; echo one[23m
+[3mecho two[23m
+MM[C[Csleep 1; echo one
+echo two
+M
+[?2004lone
+two
+[?2004h$ 

@@ -16,6 +16,7 @@
               pkgs.clojure
               pkgs.babashka
               pkgs.python3
+              pkgs.tmux
             ];
           };
         });

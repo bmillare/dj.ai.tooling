@@ -1,0 +1,6 @@
+bash-5.3$ PS1='$ '
+$ python3 -c 'import sys,time; [(sys.stdout.write(chr(13)+"["+"#"*i+" "*(10-i)+"] "+str(i*10)+chr(37)), sys.stdout.flush(), time.sleep(0.02)) for i in range(11)]; print()'
+python3 -c 'import sys,time; [(sys.stdout.write(chr(13)+"["+"#"*i+" "*(10-i)+"] "+str(i*10)+chr(37)), sys.stdout.flush(), time.sleep(0.02)) for i in range(11)]; print()'
+
+[##########] 100%
+$ 
