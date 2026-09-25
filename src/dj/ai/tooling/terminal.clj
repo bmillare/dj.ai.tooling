@@ -255,14 +255,19 @@
 (defn await
   "Blocks until the Terminal settles, times out, or has exited, then
   returns the Observation of everything since `mark`. `:settle-ms` and
-  `:timeout-ms` override the Desk's limits for this call."
+  `:timeout-ms` override the Desk's limits for this call; `:at-least-ms`
+  (default 0) is a floor under `:settled`, for a command that is silent
+  before it prints."
   ([desk terminal mark] (await desk terminal mark {}))
   ([desk terminal mark overrides]
    (let [{:keys [limits] :as desk} (checked-desk desk)
          {:keys [settle-ms timeout-ms poll-ms]} (checked-limits (merge limits (select-keys overrides [:settle-ms :timeout-ms])))
+         at-least-ms (get overrides :at-least-ms 0)
          ^Path transcript (:transcript terminal)
          length (transcript-length transcript)]
-     (if-let [error (mark-error mark length)]
+     (if-let [error (or (mark-error mark length)
+                        (when-not (and (integer? at-least-ms) (>= at-least-ms 0))
+                          {:type :invalid-limit :limit :at-least-ms :value at-least-ms}))]
        (rejected error)
        (let [started (System/nanoTime)
              ms (fn [nanos] (quot nanos 1000000))
@@ -271,7 +276,8 @@
                             current (transcript-length transcript)
                             last-change (if (not= current last-length) now last-change)]
                         (cond
-                          (>= (ms (- now last-change)) settle-ms) :settled
+                          (and (>= (ms (- now last-change)) settle-ms)
+                               (>= (ms (- now started)) at-least-ms)) :settled
                           (>= (ms (- now started)) timeout-ms) :timed-out
                           :else (do (Thread/sleep ^long poll-ms) (recur current last-change)))))
              state (pane-state desk terminal)]

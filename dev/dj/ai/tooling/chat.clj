@@ -29,6 +29,7 @@
    :bash-limits bash/default-limits
    :terminal-limits terminal/default-limits
    :terminal-maxima terminal-tool/default-maxima
+   :terminal-defaults terminal-tool/default-defaults
    :snapshot-limits {:max-bytes-per-file 50000 :max-total-bytes 100000}
    :generation-options {"temperature" 0
                         "chat_template_kwargs" {"enable_thinking" false}}})
@@ -269,11 +270,12 @@
    [:pre output]])
 
 (defn- terminal-command-view [{:keys [proposal status result]}]
-  (let [{:keys [id terminal form text keys mark expect-ms force? foreground alive?]} proposal]
+  (let [{:keys [id terminal form text keys mark expect-ms min-wait-ms force? foreground alive?]} proposal]
     [:section {:id (str "command-" id) :class "command"}
      [:p {:class "badge"} (str "Terminal " terminal " · " (name form) " · " (name status))]
      [:small {:class "muted"} (str "foreground: " foreground (when-not alive? " (exited)") " · mark " mark
                                   " · expect " (or expect-ms "default") " ms"
+                                  (when min-wait-ms (str " · at least " min-wait-ms " ms"))
                                   (when force? " · forced: sends past unseen output"))]
      [:pre (if (= :paste form) text (str/join " " keys))]
      (when (= :approval status)

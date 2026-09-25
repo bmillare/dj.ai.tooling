@@ -118,6 +118,21 @@
       (is (= (:mark observation) (:from quiet) (:mark quiet)))
       (is (<= 300 elapsed-ms 2000)))))
 
+(deftest at-least-ms-holds-settled-until-a-silent-start-has-printed
+  (with-desk [desk]
+    (let [{:keys [terminal observation]} (open-main desk)
+          sent (terminal/send! desk terminal {:text "sleep 0.7; echo late" :mark (:mark observation)})
+          early (terminal/await desk terminal (:mark sent))
+          late (terminal/await desk terminal (:mark sent) {:at-least-ms 1500})]
+      (is (= :settled (:status early)))
+      (is (not (str/includes? (:output early) "\nlate\n")) "quiet during the sleep settles too early")
+      (is (= "sleep" (:foreground early)) "and the foreground says why")
+      (is (= :settled (:status late)))
+      (is (str/includes? (:output late) "\nlate\n"))
+      (is (= :timed-out (:status (terminal/await desk terminal (:mark late) {:at-least-ms 2000 :timeout-ms 400})))
+          "a ceiling still wins over the floor")
+      (is (= :invalid-limit (get-in (terminal/await desk terminal (:mark late) {:at-least-ms -1}) [:errors 0 :type]))))))
+
 (deftest await-times-out-while-output-keeps-flowing-and-interrupt-stops-it
   (with-desk [desk {:timeout-ms 1000 :max-output-bytes 4096}]
     (let [{:keys [terminal observation]} (open-main desk)

@@ -6,7 +6,8 @@ and `dj.ai.tooling.terminal`, with the dev harness tool in
 the implementation plan below records the order the work landed in. The
 glossary's Terminal entries are the normative summary. Mechanics marked
 *verified* were checked against tmux 3.6a on 2026-09-25 with a throwaway
-server. The `wait-for` prompt return and the prepl layer remain deferred.
+server. Exact completion (OSC 133 markers) and the prepl layer remain
+deferred; see Planned below.
 
 ## Problem
 
@@ -199,7 +200,7 @@ on the first of:
 
 | status | when |
 |---|---|
-| `:settled` | no new Transcript bytes for `settle-ms`, measured from the later of the call's start and the last byte |
+| `:settled` | no new Transcript bytes for `settle-ms`, measured from the later of the call's start and the last byte, and at least `at-least-ms` since the call started |
 | `:timed-out` | `timeout-ms` since the call started, output still flowing |
 | `:exited` | `#{pane_dead}` is `1`; the Observation carries `:exit-code` |
 
@@ -341,7 +342,8 @@ Transcript remains the record; the screen is a convenience.
 
 All five are positive integers, checked the way `bash/checked-limits`
 checks, and travel in the Desk as `:limits`. `settle-ms` and `timeout-ms`
-may be overridden per `await` call; the harness owns the ceiling
+may be overridden per `await` call, and `:at-least-ms` (default 0, see
+Planned) sets a floor under `:settled`; the harness owns the ceiling
 (`:terminal-maxima` in the dev tool), so the model can ask to wait longer
 for a known slow step without the harness surrendering it.
 
@@ -409,8 +411,8 @@ Terms below become glossary entries; use them and no synonyms.
   It is the REPL half of the design and comes after the Terminal has been
   used in anger. It will likely arrive as an `observe` Selector scheme as
   much as a tool.
-- **`wait-for` prompt hook in v1.** Designed below, deferred so that Settle
-  is exercised on its own first.
+- **Exact completion in v1.** Designed under Planned, deferred so that
+  Settle and the floor are exercised on their own first.
 - **A backend protocol.** tmux is the only backend. Extract an interface
   when a second backend exists; the model-facing shapes already hide every
   tmux detail except the word tmux in the Desk.
@@ -422,41 +424,100 @@ Terms below become glossary entries; use them and no synonyms.
 - **Sandboxing.** A Terminal reaches whatever the tmux server's user can
   reach, exactly as the dev bash tool does.
 
-## Planned: exact prompt return with `wait-for`
+## Planned: exact completion
 
-For the shell layer specifically, tmux offers a signal that is exact rather
-than heuristic. The agent's shell is started with
+Settle answers "quiet for a moment"; the model wants "the thing I typed is
+done". Those diverge for a command that is silent before it prints, a
+command that goes silent in the middle, and a program that is silent
+because it is waiting for input. v1 ships two heuristics, Settle and the
+floor below, to learn where they hurt in practice. This section designs
+the exact path so that the shape is settled while the evidence is fresh.
+It is deferred, not rejected.
 
-```bash
-PROMPT_COMMAND='tmux -L dj-ai wait-for -S <terminal-name>'
+### Floor: `:at-least-ms` (implemented in v1)
+
+`await` takes `:at-least-ms`: `:settled` cannot be reported before that
+much time has passed since the call started, whatever the quiet. It is the
+model's estimate of startup latency, stated per call (`min_wait_ms` in the
+dev tool). It fixes the silent-then-prints case when the estimate is high
+enough, costs the whole floor on a fast command, and does nothing for a
+program that goes quiet mid-run unless the floor covers the run. It is
+cheap, composes with everything below, and is the v1 answer on purpose.
+The floor need not come from the model: the dev tool applies a harness
+default when the model says nothing (`:terminal-defaults`), and that slot
+is where a rule (this command usually starts slow), a per-command history,
+or a cheap local model watching the Transcript would go. That keeps the
+estimate the harness's business and the model's contract unchanged. How
+well each source sets it is one of the things v1 exists to measure. `:timed-out`
+and `:exited` are unaffected: a ceiling still wins and a dead pane is still
+reported as soon as it is quiet.
+
+### Markers in the stream: OSC 133 (preferred exact path)
+
+The shell itself can say where a command starts and ends, in band. Shell
+integration markers (FinalTerm's, used by iTerm2, VS Code, WezTerm, and
+kitty) are OSC sequences the configured shell emits around every command:
+
+```text
+ESC ] 133 ; A BEL    prompt starts
+ESC ] 133 ; B BEL    prompt ends, command input starts
+ESC ] 133 ; C BEL    command starts running, output follows
+ESC ] 133 ; D ; <exit-code> BEL    command finished
 ```
 
-so that every time bash is about to print a prompt it wakes a tmux channel,
-and the harness blocks on `tmux -L dj-ai wait-for <terminal-name>` instead of
-polling. Verified semantics that any implementation must honour:
+The default Terminal command is ours, so bash is started with a `PS1` that
+emits `A` and `B` and a `PROMPT_COMMAND` that emits `D;$?` first and `C` at
+the end of the prompt (the `DEBUG` trap is the usual place for `C`). Then:
 
-- A signal with no waiter is remembered, once. The very first prompt after
-  the shell starts leaves a wake pending, so `open!` must consume it with
-  one `wait-for`, or the first real wait returns immediately and reports a
-  command as finished before it ran (*verified*: this is what happens
-  without the consume).
-- Signals do not accumulate. Two prompts with no waiter in between are one
-  wake. One wait per submission is the rule.
-- A multi-line bracketed paste is one submission and yields one prompt after
-  the whole buffer has run, so the rule holds for pasted scripts
-  (*verified*).
-- The signal is shell-level. It says nothing while the foreground is
-  `python3` or `clojure`. `await` would take `:until :prompt` and fall back
-  to Settle whenever `:foreground` is not the shell, or when the wait
-  exceeds `timeout-ms`.
-- `wait-for` blocks the tmux client, so the harness runs it on its own
-  thread with a deadline and kills the client on timeout; tmux removes a
-  waiter when its client exits.
+- The markers land in the Transcript like any other bytes, so `await`
+  finds the completion in the file it already polls: a `D` marker after
+  the mark means the command finished, and its exit code is in the marker.
+  No side channel, no waiter thread, and a harness restart loses nothing,
+  which is the same argument that chose the Transcript over `capture-pane`.
+- The Transcript also says whether the Terminal is *at* our shell's prompt:
+  the last marker before the mark is `A` or `B` (at the prompt) or `C`
+  (running). `await` can therefore choose the signal by itself. At the
+  prompt, wait for `D`. Running something, or no marker at all, fall back
+  to Settle with the floor. The Observation names which it used:
+  `:status :prompt` with `:exit-code` for the exact case, `:settled` for
+  the guess. The model needs no `:until` option and no knowledge of what
+  is running.
+- The stripper already removes OSC strings, so the markers never reach
+  `:output`. Rendering is unchanged.
+- The `wait-for` channel is not needed. Its sticky-wake and consume-once
+  rules (*verified* earlier, and kept in the git history of this section)
+  are exactly the state the markers make explicit in the data.
 
-This changes nothing in the Observation shape: `:status` gains `:prompt`.
-It is deferred, not rejected. The point of shipping Settle first is to learn
-where the heuristic actually hurts before adding the exact path for one
-program.
+Limits, which are the same for every exact signal and are why Settle
+stays:
+
+- **Nesting.** The markers come from the shell we configured and nothing
+  else. A nested `bash`, `sh`, `ssh` to another host, a REPL, or a program
+  reading stdin emits none, so inside them `await` is back to Settle plus
+  the floor. When the nested program exits, the outer shell's `D` arrives
+  and exactness resumes. The same limit applies to `wait-for` and to any
+  prompt hook: exactness is a property of the program at the keyboard, not
+  of the Terminal.
+- **Per-program signals, same shape.** The prepl layer is this idea for
+  Clojure: a `:ret` frame is the `D` marker of an evaluation, with the
+  value where the exit code is. A Terminal running a socket prepl could be
+  awaited on `:ret` frames the way a shell is awaited on `D`, and an
+  io-prepl could be extended to emit OSC 133 itself so that the Terminal
+  needs no special case. Both are later layers; the point here is that
+  they slot into the same `await` with the same Observation shape.
+- **Trust.** A program can print a fake `D`. The markers are a completion
+  signal, not a security boundary, exactly as a prompt string is.
+- **Startup command.** A caller-supplied `:command` gets no markers unless
+  it emits them, and `open!` says nothing about it: the first `await`
+  simply settles. The Observation's `:status` tells the model which regime
+  it is in.
+
+Implementation sketch, when it is picked up: `await` scans the raw bytes
+after the mark for `ESC ] 133 ; D ; <digits> (BEL | ESC \)`, tolerating a
+marker split across the chunk boundary the same way Rendering widens cuts;
+`open!` records nothing new, because the marker state is in the file; the
+Observation gains `:status :prompt`; the dev tool changes nothing but its
+instructions.
 
 ## Implementation plan
 
@@ -549,8 +610,9 @@ this long; if it does not, show me where it is and I will decide".
 
 Tool definitions:
 
-- `terminal_send(terminal, text, mark, expect_ms?, force?)` and
-  `terminal_keys(terminal, keys, mark, expect_ms?, force?)`: after human
+- `terminal_send(terminal, text, mark, expect_ms?, min_wait_ms?, force?)`
+  and `terminal_keys(terminal, keys, mark, expect_ms?, min_wait_ms?,
+  force?)`: after human
   approval, send and then `await` from the sent mark with `expect_ms` as
   the timeout, and return that Observation. `:settled` is "finished as far
   as quiet can tell"; `:timed-out` is "still running, here is what printed
@@ -559,8 +621,12 @@ Tool definitions:
   forced send's Observation carries the stepped-over output as
   `:stepped-over`. Settle stays a harness constant: it is a property of the
   pipe, not of the model's intent.
-- `terminal_await(terminal, mark, expect_ms?)`: wait again, for a
-  `:timed-out` Observation or after an interrupt.
+- `terminal_await(terminal, mark, expect_ms?, min_wait_ms?)`: wait again,
+  for a `:timed-out` Observation or after an interrupt.
+
+`min_wait_ms` is the floor from Planned: the model's estimate of how long
+the command is silent before it prints, below which quiet is not taken as
+done. It is clamped to the same ceiling as `expect_ms`.
 - `terminal_interrupt(terminal)`, `terminal_screen(terminal)`: unchanged.
 
 `expect_ms` defaults to the Desk's `timeout-ms` and is clamped to the

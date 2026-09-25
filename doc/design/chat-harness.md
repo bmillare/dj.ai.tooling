@@ -120,8 +120,9 @@ including requests on both sides of approval pauses.
 ## Terminal contract
 
 `dev/dj/ai/tooling/terminal_tool.clj` advertises `terminal_send(terminal,
-text, mark, expect_ms, force)`, `terminal_keys(terminal, keys, mark,
-expect_ms, force)`, `terminal_await(terminal, mark, expect_ms)`,
+text, mark, expect_ms, min_wait_ms, force)`, `terminal_keys(terminal, keys,
+mark, expect_ms, min_wait_ms, force)`, `terminal_await(terminal, mark,
+expect_ms, min_wait_ms)`,
 `terminal_interrupt(terminal)`, and `terminal_screen(terminal)` over
 `dj.ai.tooling.terminal`, whose contract is [the Terminal
 design](terminal.md). A send is approved, performed, and then awaited for
@@ -139,11 +140,15 @@ working directory, and is closed on shutdown. `:terminal-limits` are the
 library defaults (`settle-ms 500`, `timeout-ms 30000`, `poll-ms 50`,
 `max-output-bytes 65536`, `max-send-bytes 65536`); `:terminal-maxima`
 (`expect-ms 120000`) caps what a model may ask for per wait, and an
-omitted `expect_ms` means the Desk's `timeout-ms`.
+omitted `expect_ms` means the Desk's `timeout-ms`. `min_wait_ms` is the
+floor from the Terminal design: quiet before that much time has passed
+since the send is not taken as done. It is clamped to the same ceiling,
+and `:terminal-defaults` (`min-wait-ms 0`) supplies it when the model
+omits it, so a harness may own the estimate.
 
 Sends and keys go through the same approval mechanism as Bash, decided
 independently: each frozen proposal carries the exact text or keys, the
-mark, `expect_ms`, the forced flag, and the Terminal's foreground program
+mark, `expect_ms`, `min_wait_ms`, the forced flag, and the Terminal's foreground program
 at proposal time; its worker thread parks until the server consumes that
 decision once, and several proposals may be pending at the same time.
 **Send** performs the send the moment it is clicked, which can still be
