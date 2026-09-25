@@ -11,7 +11,7 @@
 
 (def test-limits {:settle-ms 300 :timeout-ms 5000 :poll-ms 20})
 
-(defn- temp-dir [prefix]
+(defn temp-dir [prefix]
   (path/absolute (Files/createTempDirectory prefix (make-array FileAttribute 0))))
 
 (defmacro with-desk

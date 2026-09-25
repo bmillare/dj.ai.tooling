@@ -2,7 +2,8 @@
   (:require [clojure.data.json :as json]
             [clojure.string :as str]
             [clojure.test :refer [deftest is]]
-            [dj.ai.tooling.chat :as chat])
+            [dj.ai.tooling.chat :as chat]
+            [dj.ai.tooling.tmux :as tmux])
   (:import [java.nio.file Files]
            [java.nio.file.attribute FileAttribute]))
 
@@ -146,3 +147,32 @@
           (is (= :denied (get-in turn [:result :status])))
           (is (false? (get-in turn [:commands 0 :result :executed]))))
         (is (= 3 @n))))))
+
+(deftest terminal-sends-wait-for-approval-and-the-panel-shows-the-screen
+  (if-not (tmux/available?)
+    (println "skipping terminal-sends-wait-for-approval-and-the-panel-shows-the-screen: tmux is not installed")
+    (let [n (atom 0)
+          h (chat/harness "." chat/default-config
+                          (fn [_ _ _]
+                            (case (swap! n inc)
+                              1 (response nil (call "s" "terminal_send" {"terminal" "main" "text" "echo panel" "mark" 0 "force" true}))
+                              2 (response nil (call "w" "terminal_await" {"terminal" "main" "mark" 0}))
+                              (response "Printed"))))]
+      (try
+        (chat/send! h {:mode "chat" :task "Echo" :tools "terminal"})
+        (let [command (await-approval h)]
+          (is (= :terminal (:kind command)))
+          (is (= "echo panel" (get-in command [:proposal :text])))
+          (is (str/includes? (chat/page h) "forced: sends past unseen output"))
+          (is (str/includes? (chat/page h) "tmux -L dj-ai attach -t "))
+          (chat/decide-command! h (get-in command [:proposal :id]) true)
+          (let [turn (await-idle h)]
+            (is (= :answer (get-in turn [:result :status])))
+            (is (= :sent (get-in turn [:commands 0 :result :status])))
+            (is (true? (get-in turn [:commands 0 :result :forced?])))
+            (is (= "You · chat + Terminal" (re-find #"You · chat \+ Terminal" (chat/page h))))
+            (is (re-find #"(?m)^panel$" (chat/page h)) "the Terminals panel shows the screen")
+            (is (= 3 @n))))
+        (chat/new-chat! h)
+        (is (= 1 (count (:terminals @(:state h)))) "Terminals outlive the chat")
+        (finally (chat/close-terminals! h))))))

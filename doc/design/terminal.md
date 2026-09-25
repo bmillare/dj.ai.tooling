@@ -1,9 +1,12 @@
 # Terminal
 
-Status: designed, not implemented. The design sections are the contract; the
-implementation plan is the order of work. The glossary's Terminal entries are
-the normative summary. Mechanics marked *verified* were checked against tmux
-3.6a on 2026-09-25 with a throwaway server.
+Status: implemented (2026-09-25) in `dj.ai.tooling.tmux`, `dj.ai.tooling.ansi`,
+and `dj.ai.tooling.terminal`, with the dev harness tool in
+`dev/dj/ai/tooling/terminal_tool.clj`. The design sections are the contract;
+the implementation plan below records the order the work landed in. The
+glossary's Terminal entries are the normative summary. Mechanics marked
+*verified* were checked against tmux 3.6a on 2026-09-25 with a throwaway
+server. The `wait-for` prompt return and the prepl layer remain deferred.
 
 ## Problem
 
@@ -41,11 +44,14 @@ Terminal --screen--> rendering
 - `terminal/interrupt!` sends Ctrl-C. It needs no approval.
 - `terminal/screen` returns the pane's current rendering, for programs that
   draw rather than print.
+- `terminal/state` reports, without waiting, whether the Terminal is alive,
+  its foreground, and the Transcript's current length; a harness uses it for
+  approval prompts and panels.
 - `terminal/close!` kills the Terminal.
 
-`open!`, `send!`, `interrupt!`, and `close!` write. `await`, `screen`, and
-`transcript` read. The library never decides on its own to send; a harness
-does, after a human approves the exact text.
+`open!`, `send!`, `interrupt!`, and `close!` write. `await`, `screen`,
+`state`, and `transcript` read. The library never decides on its own to
+send; a harness does, after a human approves the exact text.
 
 ### Desk and Terminal
 
@@ -88,6 +94,15 @@ Later Terminals in the same Desk use `new-window` with the same flags.
 final output can still be read (*verified*: `#{pane_dead}` reports `1` and
 `#{pane_dead_status}` the exit code). The startup command is the caller's;
 the default is a bare bash with no rc files, matching the dev bash tool.
+
+The `history-limit` is set as a server option before `new-session` in the
+same tmux invocation, because a window reads it at creation. The pane's
+first bytes would otherwise race the `pipe-pane`: the program is started
+behind a small `sh` gate that waits for a file, and the gate file is
+created only after the pipe is open, so the first prompt is always in the
+Transcript. Terminal names are `[A-Za-z0-9][A-Za-z0-9._-]{0,63}` and unique
+within a Desk (`:invalid-name`, `:terminal-exists`). `open!` truncates any
+old Transcript of that name; `recover` never does.
 
 Terminal state is a value the caller holds, not a global:
 
@@ -320,23 +335,28 @@ Transcript remains the record; the screen is a convenience.
 ### Limits
 
 ```clojure
-{:settle-ms 500 :timeout-ms 30000 :poll-ms 50 :max-output-bytes 65536}
+{:settle-ms 500 :timeout-ms 30000 :poll-ms 50
+ :max-output-bytes 65536 :max-send-bytes 65536}
 ```
 
-All four are positive integers, checked the way `bash/checked-limits`
-checks. `settle-ms` and `timeout-ms` may be overridden per `await` call
-within caller-set maxima, so the model can ask to wait longer for a known
-slow step without the harness surrendering the ceiling.
+All five are positive integers, checked the way `bash/checked-limits`
+checks, and travel in the Desk as `:limits`. `settle-ms` and `timeout-ms`
+may be overridden per `await` call; the harness owns the ceiling
+(`:terminal-maxima` in the dev tool), so the model can ask to wait longer
+for a known slow step without the harness surrendering it.
 
 ### Results and errors
 
 Every operation returns a map tagged by `:status`: `:opened`, `:sent`,
-`:settled`, `:timed-out`, `:exited`, `:closed`, or `:rejected`. Rejections
-carry `:errors`, each with a `:type`:
+`:settled`, `:timed-out`, `:exited`, `:captured` (screen), `:read`
+(transcript), `:alive` or `:exited` (state), `:recovered`, `:closed`, or
+`:rejected`. Rejections carry `:errors`, each with a `:type`:
 
 | type | meaning |
 |---|---|
 | `:unknown-terminal` | no Terminal of that name in the Desk |
+| `:terminal-exists` | `open!` with a name the Desk already has |
+| `:invalid-name` | a Terminal name outside the allowed characters |
 | `:terminal-exited` | send to a dead pane (`await` still works, `send!` does not) |
 | `:stale-mark` | Transcript grew past the given mark and `:force?` was not set; carries `:observation` |
 | `:invalid-mark` | mark is not an integer within `[0, transcript-length]` |
@@ -444,6 +464,7 @@ Each step green under `nix develop --command clojure -X:test`. Tests that
 need tmux run against a throwaway `-L` server named per test run and kill it
 in a `finally`; they are skipped with a clear message when the tmux binary
 is absent, and `flake.nix` adds `pkgs.tmux` to the dev shell so it never is.
+All five steps have landed; deviations from the plan are noted in place.
 
 ### 1. `dj.ai.tooling.tmux`
 
@@ -455,9 +476,13 @@ first and returns data: `{:out string}` or `{:error {:type :tmux-failed
 Functions: `run` (the one shell-out; accepts optional stdin bytes),
 `new-session!`, `new-window!`, `kill-window!`, `kill-server!`,
 `set-option!`, `send-keys!` (keys vector), `load-buffer!` (from stdin),
-`paste-buffer!`, `pipe-pane!`, `capture-pane`, `display` (one or more
-`#{...}` formats, returns a map), `list-windows` (name and pane id per
-window), `wait-for` (kept out of v1 use but trivial to wrap).
+`paste-buffer!`, `pipe-pane!`, `capture-pane`, `pane` (one or more
+`#{...}` formats for one pane, returns a map), `list-windows` (name and
+pane id per window), `wait-for` and `signal!` (kept out of v1 use but
+trivial to wrap). `pane` goes through `list-panes` rather than
+`display-message`, because `display-message -t %N` with an unknown pane id
+silently expands against nothing and exits zero (*verified*), which would
+hide a closed Terminal.
 
 Tests: session round trip, `display` parsing, paste from stdin, pane id
 capture, error shape on a bad target.
@@ -465,14 +490,22 @@ capture, error shape on a bad target.
 ### 2. `dj.ai.tooling.ansi`
 
 Pure. `strip`, `overwrite`, and `render` (the composition) as specified
-under Rendering, plus `window`, which widens a `[from to)` byte range of a
-byte array to line boundaries and returns the widened range with the
-trim offsets. All are total functions; none throws on any input. This step
-lands with the property tests and the corpus described under Rendering, and
-it is the one step where more test code than production code is expected.
-The first corpus files come from the probe transcripts already captured
-during design (bash bracketed paste markers `?2004h/l`, italic paste
-highlighting, `^M` runs, a Python heredoc REPL).
+under Rendering, plus `decode` (UTF-8 with U+FFFD, mapping byte offsets to
+character indexes), `window` (widens a `[from to)` byte range of a byte
+array to line boundaries and returns the widened range with the range to
+keep), and `strip-range` / `render-range` over bytes. Trimming is done by
+the stripper itself: it runs over the widened window and emits only the
+characters whose first byte lies in the requested range, so a headless
+`[0m` after a cut is consumed as the sequence it belongs to and a character
+split by a cut is shown exactly once. All are total functions; none throws
+on any input. This step landed with the property tests and the corpus
+described under Rendering (`test/resources/transcripts/`: bash paste and
+heredoc paste, a Python 3.13 REPL, `ls --color`, `git log` through the
+pager, a `\r` progress bar, vim's alternate screen, `top`), and it is the
+one step with more test code than production code. The vim and Python REPL
+files pin the documented emission-order behaviour of TUI streams, not a
+pretty result; a change that renders them better is welcome and must update
+them on purpose.
 
 ### 3. `dj.ai.tooling.terminal`
 
@@ -520,9 +553,13 @@ contains what it needs, when `force` is the right answer to a stale
 rejection and what the better fix is, and that a truncated Observation
 names the omitted range.
 
-One Terminal named `main` is open before the first turn, so v1 needs no
-open tool and no tmux vocabulary in the prompt. The chat harness gets a
-"Terminals" panel that shows each Terminal's screen and the attach command.
+One Terminal named `main` is opened on the harness's first Terminal task,
+so v1 needs no open tool and no tmux vocabulary in the prompt. The chat
+harness gets a "Terminals" panel that shows each Terminal's screen,
+foreground, and the attach command; Terminals belong to the harness and
+survive "New chat". Tools are chosen with a select (None, Bash, Terminal)
+rather than a checkbox. The tool loop has no payload definitions: a paste
+carries the text raw, so the quoting problem payloads solve does not arise.
 
 ### 5. Docs
 

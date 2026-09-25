@@ -30,12 +30,19 @@ access.
 
 - **Chat:** send an ordinary message, then a follow-up. Prior dialogue is sent
   as context.
-- **Bash tools:** enable the checkbox in Chat, then ask: `Define greeting as text
+- **Bash tools:** choose Bash under Tools in Chat, then ask: `Define greeting as text
   with body Hello Bash. Run printf %s {{greeting}} and report its output.`
   Each resolved command appears with its working directory and limits. **Run**
   executes that exact proposal and resumes the model with its tool result.
   **Deny** executes nothing and stops the task. Repeated or stale clicks cannot
   execute a proposal again. Plain scripts need no payload definitions.
+- **Terminal tools:** choose Terminal under Tools, then ask: `Start python3,
+  print 2 ** 10, then quit.` The first Terminal task opens a Terminal named
+  `main` in the workspace; a **Terminals** panel above the composer shows its
+  screen, foreground program, and the `tmux attach` command. Each send shows
+  the exact text or key list, the foreground program, and whether the send is
+  forced, and waits for **Send / Deny**. Waits, interrupts, and screen
+  captures run without approval. Terminals outlive **New chat**.
 - **Payload:** ask: `Define greeting as text with body Hello tooling. Resolve
   JSON with body {"greeting": {{greeting}}}.` The result displays exact final
   text and an expandable resolution trace. Nothing executes.
@@ -109,6 +116,35 @@ retries. The model can inspect a failure and propose a new command for approval.
 The existing `:max-turns` budget bounds model requests for the entire task,
 including requests on both sides of approval pauses.
 
+## Terminal contract
+
+`dev/dj/ai/tooling/terminal_tool.clj` advertises `terminal_send(terminal,
+text, mark, force)`, `terminal_keys(terminal, keys, mark, force)`,
+`terminal_await(terminal, mark, settle_ms, timeout_ms)`,
+`terminal_interrupt(terminal)`, and `terminal_screen(terminal)` over
+`dj.ai.tooling.terminal`, whose contract is [the Terminal
+design](terminal.md). A response may contain at most one terminal call;
+arguments are validated atomically and an invalid response stops the task.
+
+Each harness owns one Desk: tmux server `dj-ai`, a session named
+`chat-<id>`, transcripts under the system temp directory. The Terminal
+`main` is opened on the first Terminal task, with the workspace as its
+working directory, and is closed on shutdown. `:terminal-limits` are the
+library defaults (`settle-ms 500`, `timeout-ms 30000`, `poll-ms 50`,
+`max-output-bytes 65536`, `max-send-bytes 65536`); `:terminal-maxima`
+(`settle-ms 5000`, `timeout-ms 120000`) cap what a model may ask for per
+wait.
+
+Sends and keys go through the same approval path as Bash: the frozen
+proposal carries the exact text or keys, the mark, the forced flag, and the
+Terminal's foreground program at proposal time; the worker parks until the
+server consumes the decision once. Approval performs the send, which can
+still be rejected as stale when the Terminal printed since the mark and the
+send was not forced; the rejection and any forced send carry the unseen
+output to the model and to the page. Denial produces a native tool result
+and stops the task. The Terminals panel is refreshed after every send and at
+the end of every Terminal task.
+
 ## dj.web shape
 
 Following dj.web's `docs/abridged-guidance-for-alignment.md` and
@@ -118,8 +154,8 @@ Following dj.web's `docs/abridged-guidance-for-alignment.md` and
 - Commands mutate state and return `204`; inference runs off the HTTP thread.
 - One `/updates` subscription renders the current full `<main>`. State changes
   only mark the subscription dirty. Reconnection reads current state.
-- Datastar signals contain only mode, path, and message drafts, declared with
-  `__ifmissing`. An accepted submission advances the message draft identity.
+- Datastar signals contain only mode, tools, path, and message drafts, declared
+  with `__ifmissing`. An accepted submission advances the message draft identity.
 - Native `details` elements expose traces. Their `open` attribute is preserved
   across morphs, as are active form drafts. dj.web's mobile-resume helper owns
   subscription recovery.
@@ -163,7 +199,10 @@ the normal suite requires no running model or browser.
 Bash tests additionally cover exact native continuation, retained definitions,
 atomic malformed-response rejection, denial, stale/duplicate approvals, execution
 errors, concurrent stdout/stderr draining, truncation, closed stdin, timeouts,
-script limits, and model-turn limits. Live Chromium checks against local Gemma
+script limits, and model-turn limits. Terminal tests cover atomic call
+validation, approval and denial through the harness, forced sends, the
+Terminals panel, and Terminals surviving a new chat; they skip when tmux is
+absent. Live Chromium checks against local Gemma
 composed `printf %s {{greeting}}`, reloaded while approval was pending, approved
 the resolved script, observed `Hello Bash` in stdout and the subsequent model
 answer, then denied a second command. The 390-pixel view had no horizontal

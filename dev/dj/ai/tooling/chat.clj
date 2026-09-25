@@ -11,6 +11,8 @@
             [dj.ai.tooling.local-api.client :as client]
             [dj.ai.tooling.local-api.payload :as payload]
             [dj.ai.tooling.local-api.workflow :as workflow]
+            [dj.ai.tooling.terminal :as terminal]
+            [dj.ai.tooling.terminal-tool :as terminal-tool]
             [dj.web.datastar.assets :as assets]
             [dj.web.datastar.fused :as fused]
             [dj.web.datastar.mobile-resume :as mobile-resume]
@@ -25,18 +27,30 @@
    :timeout-ms 120000 :max-response-bytes 1048576 :max-tokens 4096
    :repair-turn-budget 2 :max-turns 8
    :bash-limits bash/default-limits
+   :terminal-limits terminal/default-limits
+   :terminal-maxima terminal-tool/default-maxima
    :snapshot-limits {:max-bytes-per-file 50000 :max-total-bytes 100000}
    :generation-options {"temperature" 0
                         "chat_template_kwargs" {"enable_thinking" false}}})
 
 (defn initial-state [] {:turns [] :history [] :busy? false :draft 0})
 
+(defn desk
+  "The Desk this harness's Terminals live in: a dedicated tmux server, one
+  session per harness, transcripts under the system temp directory."
+  [config]
+  (let [session (str "chat-" (subs (str (random-uuid)) 0 8))]
+    {:socket-name "dj-ai" :session session
+     :transcript-dir (java.io.File. (System/getProperty "java.io.tmpdir") (str "dj-ai-tooling/" session))
+     :limits (:terminal-limits config)}))
+
 (defn harness
   "Create isolated harness state; request! is injectable for deterministic tests."
   ([workspace config] (harness workspace config client/complete!))
   ([workspace config request!]
    {:workspace (.getCanonicalPath (java.io.File. workspace)) :config config :request! request!
-    :state (atom (initial-state)) :subscriptions (subscribed/registry)}))
+    :desk (desk config)
+    :state (atom (assoc (initial-state) :terminals {})) :subscriptions (subscribed/registry)}))
 
 (defn- change! [{:keys [state subscriptions]} f & args]
   (apply swap! state f args)
@@ -58,6 +72,52 @@
                #(-> % (dissoc :decision) (assoc :status (:status result) :result result)))
       result)))
 
+(defn- refresh-terminal!
+  "Records a Terminal's current state and screen for the Terminals panel."
+  [{:keys [desk] :as h} terminal]
+  (let [state (terminal/state desk terminal)
+        screen (terminal/screen desk terminal)]
+    (change! h assoc-in [:terminals (:name terminal)]
+             {:terminal terminal
+              :foreground (:foreground state)
+              :status (:status state)
+              :exit-code (:exit-code state)
+              :screen (or (:screen screen) (pretty (:errors screen)))})))
+
+(defn ensure-main!
+  "Opens the Terminal named main once per harness. Returns the name to
+  Terminal map, or a rejection when tmux is unavailable."
+  [{:keys [desk state workspace] :as h}]
+  (locking desk
+    (if (get-in @state [:terminals "main"])
+      {:status :opened}
+      (let [opened (terminal/open! desk "main" {:cwd workspace})]
+        (when (= :opened (:status opened))
+          (refresh-terminal! h (:terminal opened)))
+        opened))))
+
+(defn- terminals [{:keys [state]}]
+  (into {} (map (fn [[name entry]] [name (:terminal entry)])) (:terminals @state)))
+
+(defn approve-terminal-send!
+  "Publish a frozen send proposal and park only the model worker, as
+  `approve-command!` does for Bash. The send is performed after approval and
+  the Terminals panel is refreshed either way."
+  [{:keys [desk] :as h} turn-id proposal]
+  (let [decision (promise)
+        index (count (get-in @(:state h) [:turns turn-id :commands]))
+        terminal (get (terminals h) (:terminal proposal))]
+    (change! h update-in [:turns turn-id :commands] (fnil conj [])
+             {:kind :terminal :proposal proposal :decision decision :status :approval})
+    (let [approved? @decision
+          result (if approved?
+                   (terminal-tool/perform! desk terminal proposal)
+                   {:status :denied :executed false})]
+      (change! h update-in [:turns turn-id :commands index]
+               #(-> % (dissoc :decision) (assoc :status (:status result) :result result)))
+      (refresh-terminal! h terminal)
+      result)))
+
 (defn decide-command! [{:keys [state] :as h} proposal-id approved?]
   (locking state
     (when-let [[turn-id command-id command]
@@ -71,7 +131,16 @@
       (deliver (:decision command) approved?)))
   {:status 204})
 
-(defn- run-turn! [{:keys [workspace config request!] :as h} id mode task paths history bash-tools?]
+(defn- run-terminal-task! [{:keys [desk] :as h} id task config traced!]
+  (let [opened (ensure-main! h)]
+    (if (= :rejected (:status opened))
+      {:status :stopped :errors (:errors opened)}
+      (let [result (terminal-tool/run! desk (terminals h) task config traced!
+                                       #(approve-terminal-send! h id %))]
+        (doseq [terminal (vals (terminals h))] (refresh-terminal! h terminal))
+        result))))
+
+(defn- run-turn! [{:keys [workspace config request!] :as h} id mode task paths history tools]
   (let [traced! (fn [config messages tools]
                   (let [messages (into [(first messages)] (concat history (rest messages)))
                         index (count (get-in @(:state h) [:turns id :exchanges]))]
@@ -87,8 +156,9 @@
                    "edit" (workflow/run! workspace
                                          (mapv #(hash-map :scheme :file :path %) paths)
                                          task config traced!)
-                   "chat" (if bash-tools?
-                            (bash/run! workspace task config traced! #(approve-command! h id %))
+                   "chat" (case tools
+                            "bash" (bash/run! workspace task config traced! #(approve-command! h id %))
+                            "terminal" (run-terminal-task! h id task config traced!)
                             (let [messages [{"role" "system" "content" "You are a helpful assistant."}
                                            {"role" "user" "content" task}]
                                 transport (traced! config messages [])
@@ -106,7 +176,7 @@
                   :answer (:answer result)
                   :resolved (str "Resolved text (not executed):\n" (get-in result [:state :result :final]))
                   :ready "An edit proposal is staged, awaiting human review."
-                  :denied "The human denied the proposed Bash command; this task stopped."
+                  :denied "The human denied the proposed command; this task stopped."
                   (str "Stopped: " (pr-str (:errors result))))
         diff (when (= :ready (:status result))
                (try (with-out-str (dogfood/review! (:changeset result)))
@@ -121,9 +191,10 @@
 
 (defn send!
   "Accept a single turn and release the HTTP request before inference finishes."
-  [{:keys [state] :as h} {:keys [mode task paths bash-tools?]}]
+  [{:keys [state] :as h} {:keys [mode task paths tools bash-tools?]}]
   (locking state
     (let [s @state
+          tools (cond (#{"bash" "terminal"} tools) tools (true? bash-tools?) "bash")
           task (if (string? task) task "")
           paths (if (string? paths) (vec (remove str/blank? (map str/trim (str/split-lines paths)))) [])
           pending? (= :ready (get-in s [:turns (dec (count (:turns s))) :result :status]))]
@@ -138,8 +209,8 @@
         (let [id (count (:turns s))]
           (change! h #(-> % (assoc :busy? true :notice nil) (update :draft inc)
                          (update :turns conj {:id id :token (str (random-uuid))
-                                              :task task :mode mode :paths paths :bash-tools? (true? bash-tools?) :exchanges []})))
-          (future (run-turn! h id mode task paths (:history s) (true? bash-tools?)))))))
+                                              :task task :mode mode :paths paths :tools tools :exchanges []})))
+          (future (run-turn! h id mode task paths (:history s) tools))))))
   {:status 204})
 
 (defn review!
@@ -161,16 +232,45 @@
                                                 "content" (str "Human edit review outcome: " (pr-str result))})))))))
   {:status 204})
 
-(defn new-chat! [{:keys [state] :as h}]
+(defn new-chat!
+  "Clears the conversation. Terminals belong to the harness, not the chat,
+  so they and their state survive."
+  [{:keys [state] :as h}]
   (locking state
     (when-not (:busy? @state)
-      (change! h (fn [s] (assoc (initial-state) :draft (inc (:draft s)))))))
+      (change! h (fn [s] (assoc (initial-state) :draft (inc (:draft s)) :terminals (:terminals s))))))
   {:status 204})
+
+(defn close-terminals!
+  "Kills every Terminal of this harness's Desk. For shutdown and tests."
+  [{:keys [desk state] :as h}]
+  (doseq [[_ {:keys [terminal]}] (:terminals @state)]
+    (terminal/close! desk terminal))
+  (change! h assoc :terminals {}))
 
 (defn- inspect [id title value]
   [:details {:id id :data-preserve-attr "open"} [:summary title] [:pre (pretty value)]])
 
-(defn- command-view [{:keys [proposal status result]}]
+(defn- terminal-command-view [{:keys [proposal status result]}]
+  (let [{:keys [id terminal form text keys mark force? foreground alive?]} proposal]
+    [:section {:id (str "command-" id) :class "command"}
+     [:p {:class "badge"} (str "Terminal " terminal " · " (name form) " · " (name status))]
+     [:small {:class "muted"} (str "foreground: " foreground (when-not alive? " (exited)") " · mark " mark
+                                  (when force? " · forced: sends past unseen output"))]
+     [:pre (if (= :paste form) text (str/join " " keys))]
+     (when (= :approval status)
+       [:div {:class "actions"}
+        [:button {"data-on:click" (str "@post('/run-command?id=" id "')")} "Send"]
+        [:button {:class "secondary" "data-on:click" (str "@post('/deny-command?id=" id "')")} "Deny"]])
+     (when result
+       [:div
+        (when-let [observation (or (:observation result) (get-in result [:errors 0 :observation]))]
+          [:div [:p (str "Unseen output since mark " (:from observation)
+                         (when (:truncated? observation) " · truncated"))]
+           [:pre (:output observation)]])
+        (when (:errors result) [:pre (pretty (:errors result))])])]))
+
+(defn- bash-command-view [{:keys [proposal status result]}]
   (let [{:keys [id script cwd limits trace]} proposal]
     [:section {:id (str "command-" id) :class "command"}
      [:p {:class "badge"} (str "Bash · " (name status))]
@@ -190,9 +290,25 @@
            [:pre (:text output)]])
         (when (:errors result) [:pre (pretty (:errors result))])])]))
 
-(defn- turn-view [{:keys [id token task mode paths exchanges result diff review commands bash-tools?]}]
+(defn- command-view [command]
+  (if (= :terminal (:kind command))
+    (terminal-command-view command)
+    (bash-command-view command)))
+
+(defn- terminals-view [{:keys [desk state]}]
+  (when-let [entries (seq (:terminals @state))]
+    [:section {:id "terminals"}
+     [:p {:class "label"} "Terminals"]
+     [:small {:class "muted"} (str "Attach: tmux -L " (:socket-name desk) " attach -t " (:session desk))]
+     (for [[name {:keys [foreground status exit-code screen]}] (sort-by key entries)]
+       [:div {:id (str "terminal-" name)}
+        [:p {:class "badge"} (str name " · " (clojure.core/name status) " · foreground: " foreground
+                                 (when exit-code (str " · exit " exit-code)))]
+        [:pre screen]])]))
+
+(defn- turn-view [{:keys [id token task mode paths exchanges result diff review commands tools]}]
   [:article {:id (str "turn-" id)}
-   [:div {:class "user"} [:div {:class "label"} (str "You · " mode (when (and (= mode "chat") bash-tools?) " + Bash"))] [:div {:class "text"} task]
+   [:div {:class "user"} [:div {:class "label"} (str "You · " mode (case tools "bash" " + Bash" "terminal" " + Terminal" nil))] [:div {:class "text"} task]
     (when (seq paths) [:p {:class "muted"} (str "Files: " (str/join ", " paths))])]
    [:div {:class "assistant"}
     [:div {:class "label"} "Assistant"]
@@ -228,7 +344,7 @@
 (def styles
   "*{box-sizing:border-box}body{margin:0;background:#111519;color:#e6e9ed;font:16px/1.55 system-ui,sans-serif}main{max-width:940px;margin:auto;padding:32px 22px 60px}header,.actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap}header{justify-content:space-between;border-bottom:1px solid #303840;padding-bottom:20px}h1{font-size:22px;margin:0}.muted,.label,summary{color:#a8b6c3}.label{font-size:12px;text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px}article{margin:28px 0}.user{background:#202c36;border-radius:12px;padding:18px 22px;margin-left:8%}.assistant{padding:22px 0}.text{white-space:pre-wrap;overflow-wrap:anywhere}.markdown{overflow-wrap:anywhere;min-width:0}.markdown>:first-child{margin-top:0}.markdown>:last-child{margin-bottom:0}.markdown h1{font-size:1.6em}.markdown h2{font-size:1.35em}.markdown h3{font-size:1.15em}.markdown code{font:0.9em ui-monospace,monospace;background:#202c36;border-radius:4px;padding:.15em .3em}.markdown pre code{background:none;padding:0;font:inherit}.markdown pre{white-space:pre;overflow:auto}.markdown blockquote{border-left:3px solid #455460;margin:1em 0;padding-left:1em;color:#a8b6c3}.markdown table{display:block;max-width:100%;overflow:auto;border-collapse:collapse}.markdown th,.markdown td{border:1px solid #455460;padding:.45em .7em;text-align:left}.markdown img{max-width:100%;height:auto}.markdown hr{border:0;border-top:1px solid #455460}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#0b1014;border:1px solid #303840;border-radius:8px;padding:16px;font:13px/1.6 ui-monospace,monospace;max-height:540px;overflow:auto}details{margin:14px 0}summary{cursor:pointer}button,select,input,textarea{font:inherit;color:inherit;background:#1c252d;border:1px solid #455460;border-radius:8px;padding:10px 14px}button{cursor:pointer;background:#a6dfc0;color:#10271b;font-weight:650}.secondary{background:#202c36;color:#e6e9ed}button:disabled{opacity:.45;cursor:default}textarea{display:block;width:100%;resize:vertical;margin:8px 0 14px}label{display:block}.composer{border-top:1px solid #303840;padding-top:22px}.badge{color:#a6dfc0}small{font-size:12px}.empty{padding:45px 0}.notice{color:#ffcb8b}a{color:#a6dfc0}@media(max-width:600px){main{padding:20px 14px}.user{margin-left:0}header{align-items:flex-start}}")
 
-(defn main-view [{:keys [state config workspace]}]
+(defn main-view [{:keys [state config workspace] :as h}]
   (let [{:keys [turns busy? notice draft]} @state
         signal (str "task" draft)
         pending? (= :ready (get-in (last turns) [:result :status]))]
@@ -241,17 +357,21 @@
         [:p "Chat normally, compose text with Payload, or propose file changes with Edit."]
         [:p {:class "muted"} "Open a turn’s trace to inspect exact model requests, tool calls, and results."]])
      (map turn-view turns)
+     (terminals-view h)
      (when notice [:p {:class "notice" :role "alert"} notice])
-     [:section {:class "composer" :data-signals__ifmissing (str "{mode: 'chat', paths: '', bashTools: false, " signal ": ''}")}
+     [:section {:class "composer" :data-signals__ifmissing (str "{mode: 'chat', paths: '', tools: 'none', " signal ": ''}")}
       [:form {"data-on:submit" "@post('/send')"}
        [:div {:class "actions"}
         [:label {:for "mode"} "Mode"]
         [:select {:id "mode" :data-bind "mode" :disabled busy?}
          [:option {:value "chat"} "Chat"] [:option {:value "payload"} "Payload"] [:option {:value "edit"} "Edit"]]
-        [:label {:data-show "$mode === 'chat'"}
-         [:input {:type "checkbox" :data-bind "bashTools" :disabled busy?}] " Bash tools"]]
-       [:p {:class "muted" :data-show "$mode === 'chat' && $bashTools"}
+        [:label {:for "tools" :data-show "$mode === 'chat'"} "Tools"]
+        [:select {:id "tools" :data-bind "tools" :disabled busy? :data-show "$mode === 'chat'"}
+         [:option {:value "none"} "None"] [:option {:value "bash"} "Bash"] [:option {:value "terminal"} "Terminal"]]]
+       [:p {:class "muted" :data-show "$mode === 'chat' && $tools === 'bash'"}
         "Commands run with this server’s permissions after you approve. Each task starts fresh payload definitions."]
+       [:p {:class "muted" :data-show "$mode === 'chat' && $tools === 'terminal'"}
+        "The model types into a persistent tmux shell with this server’s permissions after you approve each send. Waiting for quiet is a heuristic; the panel above shows each Terminal’s screen."]
        [:div {:data-show "$mode === 'edit'"}
         [:label {:for "paths"} "Snapshot files · one relative path per line"]
         [:textarea {:id "paths" :data-bind "paths" :rows 2 :placeholder "README.md"}]
@@ -287,7 +407,7 @@
                                 draft (:draft @(:state h))]
                             (send! h {:mode (:mode signals) :paths (:paths signals)
                                       :task (get signals (keyword (str "task" draft)))
-                                      :bash-tools? (:bashTools signals)}))
+                                      :tools (:tools signals)}))
         [:post "/new"] (new-chat! h)
         [:post "/run-command"] (decide-command! h (get-in request [:query-params "id"]) true)
         [:post "/deny-command"] (decide-command! h (get-in request [:query-params "id"]) false)
@@ -305,7 +425,8 @@
     (let [h (harness (or workspace ".") config)
           server (http/start! (partial app h) {:host "127.0.0.1"
                                                :port (parse-long (or (System/getenv "PORT") "9091"))})]
-      (.addShutdownHook (Runtime/getRuntime) (Thread. #(http/stop! server)))
+      (.addShutdownHook (Runtime/getRuntime) (Thread. #(do (close-terminals! h) (http/stop! server))))
       (println (str "Tooling chat: http://127.0.0.1:" (http/port server)))
       (println (str "Workspace: " (:workspace h)))
+      (println (str "Terminals: tmux -L " (get-in h [:desk :socket-name]) " attach -t " (get-in h [:desk :session])))
       @(promise))))

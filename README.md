@@ -332,9 +332,12 @@ limits. XML transport and execution are deferred.
 A minimal dj.web chat harness under `dev/` exercises ordinary chat, payload
 composition, and local API editing with expandable model/tool traces. Edits
 wait for explicit diff review and commit; payload text is never executed.
-Enable **Bash tools** in Chat to let the model compose commands with payload
+Choose **Bash** under Tools in Chat to let the model compose commands with payload
 references. Each resolved script waits for **Run / Deny**; execution results
 return to the model for continuation. Commands have finite time and output limits.
+Choose **Terminal** to give the model a persistent tmux shell instead; each send
+waits for **Send / Deny**, and a Terminals panel shows every Terminal's screen
+and the command to attach to it.
 
 ```bash
 nix develop --command clojure -M:chat
@@ -346,6 +349,41 @@ Open **http://127.0.0.1:9091**. Defaults target Qwen3.8 27B at
 `http://localhost:17070/v1`. The conversation is shared across tabs and kept in
 memory. See [the harness design and walkthrough](doc/design/chat-harness.md)
 for modes, configuration, session boundaries, and verification.
+
+### Terminal
+
+`dj.ai.tooling.terminal` gives a model one PTY that stays open: a tmux pane
+whose every byte is appended to a Transcript file. The model types with a
+mark, the byte offset it has read up to, and reads with `await`, which
+returns everything since that mark once the Terminal has been quiet for
+`settle-ms`, has kept printing for `timeout-ms`, or has exited. A send whose
+mark the Transcript has grown past is rejected as stale and the rejection
+carries the unseen output; `:force? true` types anyway and still returns it.
+A person can `tmux -L dj-ai attach` at any time.
+
+```clojure
+(require '[dj.ai.tooling.terminal :as terminal])
+
+(def desk {:socket-name "dj-ai" :session "task-1" :transcript-dir "/tmp/dj-ai/task-1"})
+
+(let [{:keys [terminal observation]} (terminal/open! desk "main" {:cwd "/path/to/workspace"})
+      sent (terminal/send! desk terminal {:text "ls -1" :mark (:mark observation)})
+      seen (terminal/await desk terminal (:mark sent))]
+  (:output seen))
+;; => "ls -1\nls -1\n\nREADME.md\n...\nbash-5.3$ "
+```
+
+Known limits: settling is a heuristic, so `:foreground` (the pane's current
+command) is reported with every Observation to tell a prompt from a program
+waiting on stdin. `:output` is what a person sees, including the echoed
+command, prompts, and redraws, and programs that draw (vim, top) render in
+emission order; `screen` returns their current viewport instead. A Terminal
+with a noisy background job needs a forced send or a redirect. Ctrl-C reaches
+the foreground process group only, so it kills a socket client rather than
+the evaluation behind it. Long output keeps its head and tail; the omitted
+Transcript range is named and `transcript` reads it. See
+[the Terminal design](doc/design/terminal.md) for the contract, the rendering
+rules and their tests, and the planned exact prompt return.
 
 ### Progress graph builder
 

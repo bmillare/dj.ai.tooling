@@ -287,9 +287,9 @@ Terminal --interrupt!--> :sent
 
 A Terminal is the stateful counterpart of the stateless `bash` tool: a
 shell that stays open between calls. The design is in
-[`doc/design/terminal.md`](design/terminal.md); it is not implemented yet.
-`open!`, `send!`, `interrupt!`, and `close!` write. `await`, `screen`, and
-`transcript` read. A send is the only write that reaches a running program,
+[`doc/design/terminal.md`](design/terminal.md) and the implementation in
+`dj.ai.tooling.terminal`. `open!`, `send!`, `interrupt!`, and `close!`
+write. `await`, `screen`, `state`, and `transcript` read. A send is the only write that reaches a running program,
 so it is the approval point; an interrupt only ever stops something and
 needs none.
 

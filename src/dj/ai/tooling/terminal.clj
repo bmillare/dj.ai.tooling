@@ -355,6 +355,19 @@
           (rejected (tmux-error error (:name terminal)))
           {:status :sent :terminal (:name terminal) :form :interrupt :mark mark})))))
 
+(defn state
+  "What the Terminal is doing right now, without waiting: `{:status :alive
+  | :exited, :terminal name, :foreground s, :exit-code n, :mark length}`.
+  Carries the Transcript's current length as `:mark` and moves nothing."
+  [desk terminal]
+  (let [desk (checked-desk desk)
+        state (pane-state desk terminal)]
+    (if-let [error (:error state)]
+      (rejected error)
+      {:status (if (:dead? state) :exited :alive) :terminal (:name terminal)
+       :foreground (:foreground state) :exit-code (:exit-code state)
+       :mark (transcript-length (:transcript terminal))})))
+
 (defn screen
   "The pane's current rendering, for programs that draw rather than print.
   Carries no mark and moves none."
