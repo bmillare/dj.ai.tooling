@@ -57,9 +57,14 @@
       (is (= :answer (:status result)))
       (is (str/starts-with? (get (first (:messages result)) "content") tool/instructions))
       (is (= ["s" "y" "i" "x" "n"] (mapv #(get % "tool_call_id") (tool-messages result))))
-      (is (= {:terminal "main" :form :paste :text "echo hello" :mark (:mark first-seen) :expect-ms 4000 :min-wait-ms nil
+      (is (= {:terminal "main" :form :paste :text "echo hello" :mark (:mark first-seen) :expect-ms 4000 :min-wait-ms 1000 :growth 2
               :force? false :foreground "bash" :alive? true}
              (dissoc (first @proposals) :id)))
+      (is (= "unknown" (get hello "verdict")) "the foreground was back to bash")
+      (is (= 1000 (get hello "floor-ms")))
+      (is (<= 1000 (get hello "waited-ms") 4000))
+      (is (= (get hello "waited-ms") (get hello "since-send-ms")))
+      (is (re-matches #"\d{4}-\d\d-\d\dT.*Z" (get hello "at")))
       (is (= "settled" (get hello "status")))
       (is (= "paste" (get hello "form")))
       (is (str/includes? (get hello "output") "\nhello\n"))
@@ -96,6 +101,49 @@
           [late] (map content (tool-messages result))]
       (is (= 1500 (:min-wait-ms (first @proposals))))
       (is (str/includes? (get late "output") "\nlate\n")))))
+
+(deftest the-time-policy-is-pure
+  (is (= :running (tool/verdict {:status :settled :foreground "sleep"} "bash")))
+  (is (= :unknown (tool/verdict {:status :settled :foreground "bash"} "bash")))
+  (is (= :unknown (tool/verdict {:status :settled :foreground "sleep"} nil)) "no foreground at send, no claim")
+  (is (= :done (tool/verdict {:status :exited :foreground "bash"} "bash")))
+  (is (= 2000 (tool/next-floor {:status :settled :verdict :running :floor-ms 1000 :waited-ms 1000 :ceiling-ms 30000 :growth 2})))
+  (is (= 500 (tool/next-floor {:status :settled :verdict :running :floor-ms 1000 :waited-ms 1500 :ceiling-ms 2000 :growth 2}))
+      "capped at the remaining Ceiling")
+  (is (nil? (tool/next-floor {:status :settled :verdict :running :floor-ms 1000 :waited-ms 2000 :ceiling-ms 2000 :growth 2})))
+  (is (nil? (tool/next-floor {:status :settled :verdict :unknown :floor-ms 1000 :waited-ms 1000 :ceiling-ms 30000 :growth 2})))
+  (is (nil? (tool/next-floor {:status :timed-out :verdict :running :floor-ms 1000 :waited-ms 1000 :ceiling-ms 30000 :growth 2}))))
+
+(deftest back-off-waits-again-while-the-foreground-says-running-and-awaits-continue-it
+  (with-desk [desk]
+    (let [{main :terminal first-seen :observation} (terminal/open! desk "main")
+          result (tool/run! desk {"main" main} "Print late" (assoc chat/default-config :max-turns 4)
+                            (fake-model [(response nil (call "s" "terminal_send" {"terminal" "main" "text" "sleep 2.5; echo late" "mark" (:mark first-seen)}))
+                                         (response "late was printed")])
+                            #(tool/perform! desk main %))
+          [late] (map content (tool-messages result))]
+      (is (= "settled" (get late "status")))
+      (is (str/includes? (get late "output") "\nlate\n") "the harness waited through the silence on its own")
+      (is (= "unknown" (get late "verdict")) "and returned once the foreground was back")
+      (is (= 2000 (get late "floor-ms")) "one doubling was needed")
+      (is (<= 2500 (get late "waited-ms") 6000))
+      (is (= :answer (:status result))))))
+
+(deftest an-await-without-numbers-continues-the-back-off
+  (with-desk [desk]
+    (let [{main :terminal first-seen :observation} (terminal/open! desk "main")
+          result (tool/run! desk {"main" main} "Print late" (assoc chat/default-config :max-turns 4 :terminal-defaults {:min-wait-ms 200 :expect-ms 1000})
+                            (fake-model [(response nil (call "s" "terminal_send" {"terminal" "main" "text" "sleep 1.3; echo late" "mark" (:mark first-seen)}))
+                                         (response nil (call "w" "terminal_await" {"terminal" "main" "mark" 0}))
+                                         (response "late was printed")])
+                            #(tool/perform! desk main %))
+          [sent again] (map content (tool-messages result))]
+      (is (= "timed-out" (get sent "status")) "the ceiling of one second was spent")
+      (is (= "running" (get sent "verdict")))
+      (is (= (* 2 (get sent "floor-ms")) (get again "floor-ms")) "the follow-up doubled the send's last floor")
+      (is (str/includes? (get again "output") "\nlate\n"))
+      (is (<= 1000 (get again "since-send-ms")))
+      (is (= :answer (:status result))))))
 
 (deftest sends-to-different-terminals-run-together-and-a-second-send-to-one-is-rejected
   (with-desk [desk]

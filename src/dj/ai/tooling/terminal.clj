@@ -58,6 +58,11 @@
 (defn- rejected [& errors]
   {:status :rejected :errors (vec errors)})
 
+(defn- now
+  "The Clock's instant, as an ISO-8601 string so results stay plain data."
+  []
+  (str (java.time.Instant/now)))
+
 (defn- tmux-error
   "Maps a tmux failure to the model-facing error vocabulary."
   [{:keys [stderr] :as error} terminal-name]
@@ -164,9 +169,13 @@
             dead? (= "1" dead)]
         {:dead? dead? :exit-code (when dead? (parse-long status)) :foreground command}))))
 
-(defn- observation [status {:keys [limits]} {:keys [name transcript]} from to state]
+(defn- observation
+  "An Observation of `[from, to)`. `waited-ms` is the Clock of the Wait that
+  produced it; zero for an Observation taken without waiting."
+  [status {:keys [limits]} {:keys [name transcript]} from to state waited-ms]
   (merge {:status status :terminal name :from from :mark to
-          :foreground (:foreground state) :exit-code (:exit-code state)}
+          :foreground (:foreground state) :exit-code (:exit-code state)
+          :at (now) :waited-ms waited-ms}
          (rendering transcript from to (:max-output-bytes limits))))
 
 (defn- mark-error [mark length]
@@ -203,8 +212,9 @@
 
 (def ^:private gate-script
   "Waits for the gate file so that the pipe is open before the program's
-  first byte, then becomes the program."
-  "while ! [ -e \"$0\" ]; do sleep 0.02; done; rm -f \"$0\"; exec \"$@\"")
+  first byte, then becomes the program. `HISTCONTROL=ignorespace` lets a
+  probe led by a space stay out of readline history (see Time)."
+  "while ! [ -e \"$0\" ]; do sleep 0.02; done; rm -f \"$0\"; HISTCONTROL=ignorespace; export HISTCONTROL; exec \"$@\"")
 
 (declare await)
 
@@ -284,7 +294,8 @@
          (if-let [error (:error state)]
            (rejected error)
            (observation (if (:dead? state) :exited status)
-                        desk terminal mark (transcript-length transcript) state)))))))
+                        desk terminal mark (transcript-length transcript) state
+                        (ms (- (System/nanoTime) started)))))))))
 
 (defn- text-error [text max-send-bytes]
   (cond
@@ -339,14 +350,14 @@
                            (text-error text max-send-bytes)
                            (keys-error keys max-send-bytes)))]
         (rejected error)
-        (let [unseen (when (< mark length) (observation :settled desk terminal mark length state))]
+        (let [unseen (when (< mark length) (observation :settled desk terminal mark length state 0))]
           (if (and unseen (not force?))
             (rejected {:type :stale-mark :terminal (:name terminal) :mark mark :observation unseen})
             (if-let [error (deliver! desk terminal send)]
               (rejected (tmux-error error (:name terminal)))
               (cond-> {:status :sent :terminal (:name terminal)
                        :form (if (contains? send :text) :paste :keys)
-                       :mark (if unseen length mark)}
+                       :mark (if unseen length mark) :at (now)}
                 unseen (assoc :forced? true :observation unseen)))))))))
 
 (defn interrupt!
@@ -362,7 +373,7 @@
             result (tmux/send-keys! socket-name (:pane-id terminal) ["C-c"])]
         (if-let [error (:error result)]
           (rejected (tmux-error error (:name terminal)))
-          {:status :sent :terminal (:name terminal) :form :interrupt :mark mark})))))
+          {:status :sent :terminal (:name terminal) :form :interrupt :mark mark :at (now)})))))
 
 (defn state
   "What the Terminal is doing right now, without waiting: `{:status :alive
@@ -375,7 +386,7 @@
       (rejected error)
       {:status (if (:dead? state) :exited :alive) :terminal (:name terminal)
        :foreground (:foreground state) :exit-code (:exit-code state)
-       :mark (transcript-length (:transcript terminal))})))
+       :mark (transcript-length (:transcript terminal)) :at (now)})))
 
 (defn screen
   "The pane's current rendering, for programs that draw rather than print.
@@ -385,7 +396,7 @@
         result (tmux/capture-pane socket-name (:pane-id terminal))]
     (if-let [error (:error result)]
       (rejected (tmux-error error (:name terminal)))
-      {:status :captured :terminal (:name terminal)
+      {:status :captured :terminal (:name terminal) :at (now)
        :screen (str/trimr (:out result))})))
 
 (defn transcript
@@ -399,7 +410,7 @@
     (if-let [error (or (mark-error from length) (mark-error to length)
                        (when (< to from) {:type :invalid-mark :mark to :minimum from}))]
       (rejected error)
-      (merge {:status :read :terminal (:name terminal) :from from :to to}
+      (merge {:status :read :terminal (:name terminal) :from from :to to :at (now)}
              (rendering file from to (:max-output-bytes limits))))))
 
 (defn close!

@@ -376,7 +376,8 @@ A person can `tmux -L dj-ai attach` at any time.
 
 Known limits: settling is a heuristic, so `:foreground` (the pane's current
 command) is reported with every Observation to tell a prompt from a program
-waiting on stdin. `:output` is what a person sees, including the echoed
+waiting on stdin, and every result carries a clock (`:at`, `:waited-ms`) so
+a model can notice a command that should have finished long ago. `:output` is what a person sees, including the echoed
 command, prompts, and redraws, and programs that draw (vim, top) render in
 emission order; `screen` returns their current viewport instead. A Terminal
 with a noisy background job needs a forced send or a redirect. Ctrl-C reaches

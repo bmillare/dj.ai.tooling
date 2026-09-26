@@ -16,13 +16,15 @@
   {:expect-ms 120000})
 
 (def default-defaults
-  "What the harness assumes when the model does not say. `:min-wait-ms` is
-  the floor under settled; a harness may replace it with a rule or a
-  learned estimate without changing the model's contract."
-  {:min-wait-ms 0})
+  "The Time policy the harness applies when the model does not say (see
+  doc/design/terminal.md, Time): `:min-wait-ms` the first Floor,
+  `:expect-ms` the Ceiling, `:growth` the Back-off factor. A harness may
+  replace these with a rule or a learned estimate without changing the
+  model's contract."
+  {:min-wait-ms 1000 :expect-ms 30000 :growth 2})
 
 (def instructions
-  "You have a Terminal named main: a real shell that keeps its state between calls, in the configured workspace. terminal_send(terminal, text, mark, expect_ms, min_wait_ms) pastes text as one unit, presses Enter, waits, and returns what printed; terminal_keys(terminal, keys, mark, expect_ms, min_wait_ms) does the same for named keys such as Up, Enter, C-c, C-d, or literal strings. Both need human approval and run only after it. expect_ms is the longest you are willing to wait: the result is status settled when the Terminal went quiet, timed-out when it was still printing after expect_ms (the command is still running; the result shows what printed so far), or exited with an exit code. Quiet is judged over a fraction of a second, so a command that is silent before it prints (a slow start, a compile, a network call) settles too early with only your echoed command: set min_wait_ms to how long you expect that silence to last, and settled is not reported before it. For a timed-out or too-early result, terminal_await(terminal, mark, expect_ms, min_wait_ms) waits again from a mark, and terminal_interrupt(terminal) sends Ctrl-C without approval. Every result carries mark, the point you have seen up to; always pass the latest mark for that Terminal to the next call. A send with an old mark is rejected as stale, and the rejection carries the unseen output as observation, so read it and resend with the new mark. If the same noise keeps arriving from a background job, resend with force true: the send is typed anyway and the result includes what you stepped over; the real fix is to redirect that job's output to a file or stop it. Quiet is a heuristic, not completion: foreground names the program the Terminal is running (bash usually means a prompt is waiting; python3 means a REPL or a program reading stdin; a compiler may just be busy). Output is what a person would see: your echoed input, prompts, and redraws; long output keeps its head and tail with one marker line naming the omitted transcript range. terminal_screen(terminal) returns the current screen for programs that draw. You may make several calls in one response and they run at the same time, but only one send per Terminal per response: put a sequence of commands for one Terminal in one multi-line text. A denied send returns status denied and you may continue with the rest. Never claim a command ran before its tool result.")
+  "You have a Terminal named main: a real shell that keeps its state between calls, in the configured workspace. terminal_send(terminal, text, mark, expect_ms, min_wait_ms) pastes text as one unit, presses Enter, waits, and returns what printed; terminal_keys(terminal, keys, mark, expect_ms, min_wait_ms) does the same for named keys such as Up, Enter, C-c, C-d, or literal strings. Both need human approval and run only after it. expect_ms is the longest you are willing to wait (default 30000): the result is status settled when the Terminal went quiet, timed-out when it was still busy after expect_ms (the command is still running; the result shows what printed so far), or exited with an exit code. Quiet is judged over a fraction of a second, so a command that is silent before it prints settles too early; min_wait_ms (default 1000) is how long you expect that silence to last, and settled is not reported before it. While the foreground program differs from the one you typed at, the harness knows the command is still running and keeps waiting on its own with a doubling window, up to expect_ms; the result's verdict says running when it did that and unknown when it could not tell, and floor_ms is the last window it used. For a timed-out or too-early result, terminal_await(terminal, mark, expect_ms, min_wait_ms) waits again from a mark, continuing the doubling where it left off unless you give numbers, and terminal_interrupt(terminal) sends Ctrl-C without approval. Every result carries a clock: at is when it was taken, waited_ms how long the call waited, since_send_ms how long ago you last sent to that Terminal. Read it: a command that should have finished long ago has not, so stop waiting and change course rather than wait again. Every result carries mark, the point you have seen up to; always pass the latest mark for that Terminal to the next call. A send with an old mark is rejected as stale, and the rejection carries the unseen output as observation, so read it and resend with the new mark. If the same noise keeps arriving from a background job, resend with force true: the send is typed anyway and the result includes what you stepped over; the real fix is to redirect that job's output to a file or stop it. Quiet is a heuristic, not completion: foreground names the program the Terminal is running (bash usually means a prompt is waiting; python3 means a REPL or a program reading stdin; a compiler may just be busy). When you cannot tell whether a shell or REPL is listening, probe it: send a line with a known reply and a nonce, led by a space so it stays out of history, such as \" echo probe-7f3a\" at a shell or \"print('probe-7f3a')\" at Python; the nonce alone on its own line after your send is the reply, the echoed command text is not, and no reply within expect_ms means the program is still busy. Never probe a Terminal whose last lines look like a question or a prompt for input, because the probe becomes the answer. Output is what a person would see: your echoed input, prompts, and redraws; long output keeps its head and tail with one marker line naming the omitted transcript range. terminal_screen(terminal) returns the current screen for programs that draw. You may make several calls in one response and they run at the same time, but only one send per Terminal per response: put a sequence of commands for one Terminal in one multi-line text. A denied send returns status denied and you may continue with the rest. Never claim a command ran before its tool result.")
 
 (defn- object [required properties]
   {"type" "object" "additionalProperties" false "required" required "properties" properties})
@@ -120,58 +122,125 @@
   (when-let [expect (get arguments "expect_ms")]
     (min expect (:expect-ms maxima))))
 
-(defn- min-wait-ms
-  "The model's floor, else the harness default, clamped; nil when zero."
-  [{:keys [maxima defaults]} arguments]
-  (let [floor (min (or (get arguments "min_wait_ms") (:min-wait-ms defaults) 0) (:expect-ms maxima))]
-    (when (pos? floor) floor)))
+(defn- clamp [value maximum] (when value (min value maximum)))
 
-(defn- await-overrides [{:keys [maxima] :as policy} arguments]
-  (cond-> {}
-    (expect-ms maxima arguments) (assoc :timeout-ms (expect-ms maxima arguments))
-    (min-wait-ms policy arguments) (assoc :at-least-ms (min-wait-ms policy arguments))))
+(defn- ceiling-ms
+  "The model's `expect_ms`, else the harness default, clamped."
+  [{:keys [maxima defaults]} arguments]
+  (clamp (or (get arguments "expect_ms") (:expect-ms defaults)) (:expect-ms maxima)))
+
+(defn- floor-ms
+  "The model's `min_wait_ms`, else `fallback` (the harness default or the
+  Back-off continuation), clamped to the Ceiling."
+  [{:keys [defaults] :as policy} arguments fallback]
+  (clamp (or (get arguments "min_wait_ms") fallback (:min-wait-ms defaults)) (ceiling-ms policy arguments)))
+
+;;; Time policy: pure
+
+(defn verdict
+  "The harness's read of a settled Wait against the foreground at send
+  time: `:running` when the foreground differs (something the model
+  started still owns the Terminal), `:done` when the pane exited,
+  `:unknown` otherwise, including when no foreground at send is known."
+  [{:keys [status foreground]} foreground-at-send]
+  (cond
+    (= :exited status) :done
+    (and foreground-at-send (not= foreground foreground-at-send)) :running
+    :else :unknown))
+
+(defn next-floor
+  "Back-off: the Floor of the next Wait, or nil to return to the model.
+  Waits again only on a settled `:running` Verdict with Ceiling left."
+  [{:keys [status verdict floor-ms waited-ms ceiling-ms growth]}]
+  (let [remaining (- ceiling-ms waited-ms)]
+    (when (and (= :settled status) (= :running verdict) (pos? remaining))
+      (min (* floor-ms growth) remaining))))
+
+(defn- wait!
+  "One tool-level wait: a Wait, then Back-off while the Verdict is
+  `:running`. Returns the last Observation with the Clock summed and the
+  policy's `:verdict` and `:floor-ms`."
+  [desk terminal mark {:keys [floor-ms ceiling-ms growth foreground-at-send]}]
+  (loop [floor floor-ms waited 0]
+    (let [observation (terminal/await desk terminal mark {:at-least-ms floor :timeout-ms (max 1 (- ceiling-ms waited))})
+          waited (+ waited (or (:waited-ms observation) 0))
+          verdict (when (not= :rejected (:status observation)) (verdict observation foreground-at-send))
+          again (when verdict (next-floor {:status (:status observation) :verdict verdict :floor-ms floor
+                                           :waited-ms waited :ceiling-ms ceiling-ms :growth growth}))]
+      (if again
+        (recur again waited)
+        (cond-> observation
+          verdict (assoc :waited-ms waited :verdict verdict :floor-ms floor))))))
 
 (defn proposal
   "The frozen send a human approves: the exact text or keys, the mark, the
   expected duration, and the Terminal's state at proposal time."
-  [desk terminal {:keys [maxima] :as policy} {:keys [name arguments]}]
+  [desk terminal {:keys [defaults] :as policy} {:keys [name arguments]}]
   (let [state (terminal/state desk terminal)]
     (merge {:id (str (random-uuid)) :terminal (:name terminal)
             :mark (get arguments "mark") :force? (true? (get arguments "force"))
-            :expect-ms (expect-ms maxima arguments)
-            :min-wait-ms (min-wait-ms policy arguments)
+            :expect-ms (ceiling-ms policy arguments)
+            :min-wait-ms (floor-ms policy arguments nil)
+            :growth (:growth defaults)
             :foreground (:foreground state) :alive? (= :alive (:status state))}
            (if (= name "terminal_send")
              {:form :paste :text (get arguments "text")}
              {:form :keys :keys (vec (get arguments "keys"))}))))
 
 (defn perform!
-  "Performs an approved proposal and awaits it: the only path by which
-  model text reaches a Terminal. Returns the Observation, with `:form` and,
-  for a forced send, `:stepped-over`; or the send's rejection."
-  [desk terminal {:keys [form text keys mark force? expect-ms min-wait-ms]}]
+  "Performs an approved proposal and waits on it with the proposal's Time
+  policy: the only path by which model text reaches a Terminal. Returns
+  the Observation with `:form`, the Clock (`:since-send-ms` equal to
+  `:waited-ms` here), the `:verdict`, and, for a forced send,
+  `:stepped-over`; or the send's rejection."
+  [desk terminal {:keys [form text keys mark force? expect-ms min-wait-ms growth foreground]}]
   (let [sent (terminal/send! desk terminal (merge {:mark mark :force? force?}
                                                   (if (= :paste form) {:text text} {:keys keys})))]
     (if (not= :sent (:status sent))
       sent
-      (cond-> (assoc (terminal/await desk terminal (:mark sent)
-                                     (cond-> {}
-                                       expect-ms (assoc :timeout-ms expect-ms)
-                                       min-wait-ms (assoc :at-least-ms min-wait-ms)))
-                     :form form)
-        (:forced? sent) (assoc :forced? true :stepped-over (:observation sent))))))
+      (let [observation (wait! desk terminal (:mark sent)
+                               {:floor-ms min-wait-ms :ceiling-ms expect-ms :growth growth
+                                :foreground-at-send foreground})]
+        (cond-> (assoc observation :form form :since-send-ms (:waited-ms observation))
+          (:forced? sent) (assoc :forced? true :stepped-over (:observation sent)))))))
+
+(defn- remember!
+  "Per-Terminal memory for the Clock and the Back-off continuation."
+  [memory name result]
+  (when (contains? result :verdict)
+    (swap! memory update name
+           (fn [entry]
+             (cond-> (assoc entry :floor-ms (:floor-ms result))
+               (:form result) (assoc :sent-at (- (System/currentTimeMillis) (:waited-ms result))
+                                     :foreground-at-send (:foreground-at-send result)))))))
 
 (defn- execute!
   "Runs one accepted call. `approve!` receives a proposal for sends and
   keys and returns the performed result, `{:status :denied}`, or
-  `{:status :stopped}`."
-  [desk terminals policy approve! {:keys [name arguments] :as call}]
+  `{:status :stopped}`. `memory` holds each Terminal's last send and Floor."
+  [desk terminals {:keys [defaults] :as policy} memory approve! {:keys [name arguments] :as call}]
   (if-let [terminal (get terminals (get arguments "terminal"))]
-    (case name
-      ("terminal_send" "terminal_keys") (approve! (proposal desk terminal policy call))
-      "terminal_await" (terminal/await desk terminal (get arguments "mark") (await-overrides policy arguments))
-      "terminal_interrupt" (terminal/interrupt! desk terminal)
-      "terminal_screen" (terminal/screen desk terminal))
+    (let [terminal-name (:name terminal)
+          remembered (get @memory terminal-name)
+          result (case name
+                   ("terminal_send" "terminal_keys")
+                   (let [proposal (proposal desk terminal policy call)
+                         result (approve! proposal)]
+                     (cond-> result
+                       (contains? result :verdict) (assoc :foreground-at-send (:foreground proposal))))
+                   "terminal_await"
+                   (let [result (wait! desk terminal (get arguments "mark")
+                                       {:floor-ms (floor-ms policy arguments (some-> (:floor-ms remembered) (* (:growth defaults))))
+                                        :ceiling-ms (ceiling-ms policy arguments)
+                                        :growth (:growth defaults)
+                                        :foreground-at-send (:foreground-at-send remembered)})]
+                     (cond-> result
+                       (and (:sent-at remembered) (contains? result :verdict))
+                       (assoc :since-send-ms (- (System/currentTimeMillis) (:sent-at remembered)))))
+                   "terminal_interrupt" (terminal/interrupt! desk terminal)
+                   "terminal_screen" (terminal/screen desk terminal))]
+      (remember! memory terminal-name result)
+      (dissoc result :foreground-at-send))
     {:status :rejected :errors [{:type :unknown-terminal :terminal (get arguments "terminal")}]}))
 
 (defn- repeated-sends
@@ -188,13 +257,13 @@
 
 (defn- execute-all!
   "Runs a response's calls concurrently and returns results in call order."
-  [desk terminals policy approve! calls]
+  [desk terminals policy memory approve! calls]
   (let [repeated (repeated-sends calls)
         futures (mapv (fn [call]
                         (if (repeated (:call-id call))
                           (future {:status :rejected
                                    :errors [{:type :one-send-per-terminal :terminal (get-in call [:arguments "terminal"])}]})
-                          (future (execute! desk terminals policy approve! call))))
+                          (future (execute! desk terminals policy memory approve! call))))
                       calls)]
     (mapv deref futures)))
 
@@ -210,6 +279,7 @@
   [desk terminals task config request! approve!]
   (let [policy {:maxima (merge default-maxima (:terminal-maxima config))
                 :defaults (merge default-defaults (:terminal-defaults config))}
+        memory (atom {})
         max-turns (:max-turns config)]
     (when-not (and (integer? max-turns) (<= 1 max-turns Integer/MAX_VALUE))
       (throw (ex-info "Supply a finite positive max-turns." {:type :invalid-config :key :max-turns})))
@@ -227,7 +297,7 @@
           (case (:status accepted)
             :answer {:status :answer :answer (:answer accepted) :messages messages}
             :calls (let [calls (:calls accepted)
-                         results (execute-all! desk terminals policy approve! calls)
+                         results (execute-all! desk terminals policy memory approve! calls)
                          messages (into messages (map tool-result calls results))]
                      (if (some #(= :stopped (:status %)) results)
                        {:status :stopped :messages messages :errors [{:type :stopped-by-human}]}

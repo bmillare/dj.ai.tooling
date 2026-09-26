@@ -45,7 +45,7 @@
       (is (re-matches #"%\d+" (:pane-id terminal)))
       (is (= {:status :settled :terminal "main" :from 0 :foreground "bash"
               :truncated? false :omitted nil :exit-code nil}
-             (dissoc observation :output :mark)))
+             (dissoc observation :output :mark :at :waited-ms)))
       (is (str/ends-with? (:output observation) "$ ") "the first prompt is in the Transcript")
       (is (pos? (:mark observation)))
       (is (= (:mark observation) (Files/size (:transcript terminal)))))))
@@ -116,7 +116,12 @@
       (is (= :settled (:status quiet)))
       (is (= "" (:output quiet)))
       (is (= (:mark observation) (:from quiet) (:mark quiet)))
-      (is (<= 300 elapsed-ms 2000)))))
+      (is (<= 300 elapsed-ms 2000))
+      (is (<= 300 (:waited-ms quiet) elapsed-ms) "the Clock reports the Wait")
+      (is (re-matches #"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d.*Z" (:at quiet)))
+      (is (string? (:at (terminal/state desk terminal))))
+      (is (= 0 (:waited-ms (get-in (terminal/send! desk terminal {:text "x" :mark 0}) [:errors 0 :observation])))
+          "an Observation taken without waiting says so"))))
 
 (deftest at-least-ms-holds-settled-until-a-silent-start-has-printed
   (with-desk [desk]
@@ -143,7 +148,7 @@
       (is (= "yes" (:foreground flowing)))
       (is (true? (:truncated? flowing)))
       (is (str/includes? (:output flowing) "bytes omitted, transcript"))
-      (is (= {:status :sent :terminal "main" :form :interrupt} (dissoc interrupted :mark)))
+      (is (= {:status :sent :terminal "main" :form :interrupt} (dissoc interrupted :mark :at)))
       (is (= :settled (:status stopped)))
       (is (= "bash" (:foreground stopped)))
       (is (str/ends-with? (:output stopped) "$ ")))))
@@ -202,7 +207,7 @@
           once (run desk terminal "echo repeated" (:mark observation))
           sent (terminal/send! desk terminal {:keys ["Up" "Enter"] :mark (:mark once)})
           again (terminal/await desk terminal (:mark sent))]
-      (is (= {:status :sent :terminal "main" :form :keys :mark (:mark once)} sent))
+      (is (= {:status :sent :terminal "main" :form :keys :mark (:mark once)} (dissoc sent :at)))
       (is (str/includes? (:output again) "\nrepeated\n"))
       (is (= :invalid-keys (get-in (terminal/send! desk terminal {:keys [] :mark (:mark again)}) [:errors 0 :type])))
       (is (= :invalid-keys (get-in (terminal/send! desk terminal {:keys ["Up" ""] :mark (:mark again)}) [:errors 0 :type])))

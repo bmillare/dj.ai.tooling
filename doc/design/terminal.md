@@ -324,6 +324,28 @@ A Verdict comes from a source, and every source must be honest about
 | foreground (`#{pane_current_command}`) | differs from the foreground at send time (`sleep`, `make`, `java` after typing at `bash`) | never | equals the foreground at send time | the local PTY only: inside `ssh` the foreground is `ssh` for the whole session, so every Verdict there is `:unknown` and the wait is model-driven |
 | completion markers (OSC 133, Planned) | `C` seen after the mark and no `D` | `D` seen after the mark, with the exit code | no marker after the mark | the configured shell, wherever it runs: markers travel in band, so a remote shell configured to emit them reaches through `ssh` |
 | prepl `:ret` frames (later layer) | an `:out` frame after the mark and no `:ret` | a `:ret` frame after the mark | no frame | a Clojure program on the other end of the connection |
+| **Probe** (model-driven) | the Ceiling passes with only the probe's echo visible | the probe's reply, a nonce alone on a line, appears after the probe's mark | never: a probe was sent to get an answer | anything that reads lines and answers: a shell, a REPL, a shell inside `ssh` or a container; needs no configuration of the far end |
+
+**Probe.** A probe is a send whose only purpose is to manufacture a
+Verdict when no passive source has one: `echo probe-7f3a` at a shell,
+`print("probe-7f3a")` at Python, `:probe-7f3a` at a Clojure REPL. It is
+what a person does when a REPL has gone quiet: type something with a known
+answer and see whether it answers. Two facts make it harder than it looks.
+The echo is not the reply: a PTY echoes typed characters at once, whether
+or not the program has read them, so only the nonce on its own line is
+evidence. And stdin is consumed: a probe typed into a busy shell runs
+harmlessly after the current command, but a probe typed into a program
+reading input becomes that program's input (`rm -i`, a `[y/N]`, `read`,
+Python's `input()`); even a bare Enter accepts a default. A probe also
+lands in readline history, so `Up` reruns it; the configured bash sets
+`HISTCONTROL=ignorespace` and the instructions say to lead a probe with a
+space. Probes are **model-driven only**: they need no mechanism beyond a
+send, the reviewer sees each one, and the model has the screen and the
+foreground to judge whether the Terminal is asking a question. The harness
+never probes on its own, because a probe is the one Verdict source that
+can change the world while asking whether the world has finished; the
+harness's exact source is the passive markers. This is experimental and
+is in v1 to be tested, not because it is settled.
 
 The foreground source is exact as a value and cheap, and it is local. Its
 `:running` is trustworthy, because a foreground that changed is a
@@ -341,9 +363,9 @@ policy over sources that each say `:unknown` outside their reach, and a
 model that is always given the Clock so that `:unknown` is not the end of
 the story.
 
-Status: Floor and Ceiling are implemented; Clock, Verdict from the
-foreground, and Back-off are the next step; the marker and prepl sources
-are deferred under Planned.
+Status: Floor, Ceiling, Clock, the foreground Verdict, Back-off, and the
+model-driven probe (as instruction text) are implemented; the marker and
+prepl sources are deferred under Planned.
 
 ### Rendering
 
@@ -497,6 +519,8 @@ Terms below become glossary entries; use them and no synonyms.
   or `:unknown`. (Not: evidence, signal, guess, state.)
 - **Back-off**: waiting again with a doubled Floor while the Verdict is
   `:running`. (Not: retry, polling, exponential in prose.)
+- **Probe**: a send made only to get a known reply, as a Verdict source.
+  (Not: ping, status check, heartbeat.)
 - **Screen**: the rendered viewport. (Not: pane contents, view.)
 - **Stale mark** mirrors **stale basis**: the model acted on something the
   world has moved past.
@@ -706,11 +730,14 @@ Tool definitions:
 
 `min_wait_ms` is the Floor: the model's estimate of how long the command
 is silent before it prints, below which quiet is not taken as done. It is
-clamped to the same ceiling as `expect_ms`.
+clamped to the same ceiling as `expect_ms`. Every result carries the Clock
+(`:at`, `:waited-ms`, `:since-send-ms`), the `:verdict` the harness
+reached, and the `:floor-ms` the last Wait used, so the model can see why
+the harness waited as long as it did.
 
 **Time policy.** The tool owns the decisions the library refuses to make
 (see Time). Defaults, in `:terminal-defaults`: Floor 1000 ms, Ceiling
-30000 ms (the Desk's `timeout-ms`), Back-off doubling. A send or an await
+30000 ms, Back-off doubling (`:growth 2`). A send or an await
 is one tool call that may hold several Waits: after a settled Wait the
 tool takes the foreground Verdict against the foreground recorded at the
 send; on `:running` it Waits again from the same mark with twice the

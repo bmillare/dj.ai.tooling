@@ -408,8 +408,19 @@ foreground at send time (`:running` when it differs, `:unknown` when it
 matches, never `:done`; local PTY only, so inside `ssh` it is always
 `:unknown`); completion markers in the Transcript (OSC 133, deferred:
 `:done` with the exit code, reaching wherever the configured shell runs);
-prepl `:ret` frames (later layer). Every source says `:unknown` outside
-its reach; that honesty is what lets one policy serve them all.
+prepl `:ret` frames (later layer); a Probe. Every source says `:unknown`
+outside its reach; that honesty is what lets one policy serve them all.
+
+## Probe
+
+A send made only to get a known reply, so that a Terminal with no passive
+Verdict source can be asked whether it is listening: `echo probe-<nonce>`
+at a shell, `print("probe-<nonce>")` at Python. The reply, the nonce alone
+on a line after the probe's mark, is `:done`; the Ceiling passing with only
+the echo is `:running`. The echo is never evidence, because a PTY echoes
+typed characters before the program reads them. A probe consumes stdin,
+so it is never sent to a Terminal whose tail looks like a question, and
+it is model-driven only: the harness never probes on its own. Experimental.
 
 ## Back-off
 

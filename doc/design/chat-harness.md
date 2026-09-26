@@ -139,12 +139,16 @@ Each harness owns one Desk: tmux server `dj-ai`, a session named
 working directory, and is closed on shutdown. `:terminal-limits` are the
 library defaults (`settle-ms 500`, `timeout-ms 30000`, `poll-ms 50`,
 `max-output-bytes 65536`, `max-send-bytes 65536`); `:terminal-maxima`
-(`expect-ms 120000`) caps what a model may ask for per wait, and an
-omitted `expect_ms` means the Desk's `timeout-ms`. `min_wait_ms` is the
-floor from the Terminal design: quiet before that much time has passed
-since the send is not taken as done. It is clamped to the same ceiling,
-and `:terminal-defaults` (`min-wait-ms 0`) supplies it when the model
-omits it, so a harness may own the estimate.
+(`expect-ms 120000`) caps what a model may ask for per wait.
+`:terminal-defaults` (`min-wait-ms 1000`, `expect-ms 30000`, `growth 2`)
+is the Time policy the harness applies when the model gives no numbers:
+the first Floor, the Ceiling, and the Back-off factor (see the Terminal
+design, Time). A send or an await may hold several Waits: while the
+foreground differs from the one at send time the harness waits again with
+a doubled Floor, and returns on anything else. Every result carries the
+Clock (`at`, `waited-ms`, `since-send-ms`), the `verdict`, and the last
+`floor-ms`. Probes are model-driven and are described in the instructions
+only.
 
 Sends and keys go through the same approval mechanism as Bash, decided
 independently: each frozen proposal carries the exact text or keys, the

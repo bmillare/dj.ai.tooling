@@ -264,9 +264,12 @@
 (defn- inspect [id title value]
   [:details {:id id :data-preserve-attr "open"} [:summary title] [:pre (pretty value)]])
 
-(defn- observation-view [title {:keys [from mark foreground exit-code truncated? output]}]
+(defn- observation-view [title {:keys [from mark foreground exit-code truncated? output waited-ms verdict floor-ms at]}]
   [:div [:p (str title " · marks " from ".." mark " · foreground: " foreground
-                 (when exit-code (str " · exit " exit-code)) (when truncated? " · truncated"))]
+                 (when exit-code (str " · exit " exit-code)) (when truncated? " · truncated")
+                 (when waited-ms (str " · waited " waited-ms " ms"))
+                 (when verdict (str " · verdict " (name verdict) " · floor " floor-ms " ms"))
+                 (when at (str " · at " at)))]
    [:pre output]])
 
 (defn- terminal-command-view [{:keys [proposal status result]}]
