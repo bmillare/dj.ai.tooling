@@ -15,6 +15,7 @@
               pkgs.temurin-bin
               pkgs.clojure
               pkgs.babashka
+              pkgs.netcat
               pkgs.python3
               pkgs.tmux
             ];
