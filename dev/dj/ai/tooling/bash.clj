@@ -1,13 +1,13 @@
 (ns dj.ai.tooling.bash
   "Dev-only payload-backed Bash protocol and bounded local process executor."
   (:refer-clojure :exclude [run!])
-  (:require [clojure.data.json :as json]
-            [clojure.string :as str]
+  (:require [clojure.string :as str]
             [dj.ai.tooling.local-api.calls :as calls]
             [dj.ai.tooling.local-api.client :as client]
             [dj.ai.tooling.local-api.payload :as payload-api]
             [dj.ai.tooling.payload :as payload]
-            [dj.ai.tooling.payload.strings :as strings])
+            [dj.ai.tooling.payload.strings :as strings]
+            [dj.ai.tooling.tool-result :as tool-result])
   (:import [java.io ByteArrayOutputStream InputStream]
            [java.lang ProcessHandle]
            [java.nio.charset StandardCharsets]
@@ -23,7 +23,7 @@
     limits))
 
 (def instructions
-  "You may use define_payload(id, lang, body) to retain immutable text templates, and bash(body) to request a Bash command. Body is a native string, not a JSON-encoded document. bash treats body as the payload's top-level body with lang bash: use naked {{id}} references and the host supplies string quoting; write \\{{ for literal {{. Definitions may refer forward and persist within this task. Each response may contain definitions and at most one bash call. The host resolves the complete response atomically, shows the exact script for human approval, and runs only after approval. Each command starts fresh Bash in the configured workspace, with closed stdin and fixed timeout/output limits. No shell state persists; filesystem effects do. Read execution results, then answer or request another command, which also needs approval. Never claim a command ran before its tool result. Denial stops the task.")
+  "You may use define_payload(id, lang, body) to retain immutable text templates, and bash(body) to request a Bash command. Body is a native string, not a JSON-encoded document. bash treats body as the payload's top-level body with lang bash: use naked {{id}} references and the host supplies string quoting; write \\{{ for literal {{. Definitions may refer forward and persist within this task. Each response may contain definitions and at most one bash call. The host resolves the complete response atomically, shows the exact script for human approval, and runs only after approval. Each command starts fresh Bash in the configured workspace, with closed stdin and fixed timeout/output limits. No shell state persists; filesystem effects do. A result is an EDN map such as {:status :exited :executed true :exit-code 0}, then what the command printed, unescaped, in tags such as <stdout-k3x9>...</stdout-k3x9> and <stderr-k3x9>...</stderr-k3x9>: the text starts on the line after the opening tag and ends right before the closing tag, and the tag suffix is a fresh nonce in every result. An empty stream has no tag; a cut one has :truncated? true in the map. Read execution results, then answer or request another command, which also needs approval. Never claim a command ran before its tool result. Denial stops the task.")
 
 (def tool-definitions
   [(first payload-api/tool-definitions)
@@ -157,47 +157,63 @@
         (catch Exception e
           {:status :launch-failed :executed false :errors [{:message (.getMessage e)}]})))))
 
+(defn- stream-metadata
+  "A stream's metadata, only when there is more to say than its text:
+  truncation, a read error, or an incomplete read."
+  [{:keys [truncated?] :as stream}]
+  (not-empty (cond-> (dissoc stream :text) (not truncated?) (dissoc :truncated? :bytes-seen))))
+
+(defn result-text
+  "The model-facing text of a Bash tool result: EDN metadata, then stdout
+  and stderr as raw Bodies. An empty stream has no Body."
+  [result]
+  (tool-result/render
+   (tool-result/ordered (-> result
+                            (update :stdout stream-metadata)
+                            (update :stderr stream-metadata))
+                        [:status :executed :exit-code :id :stdout :stderr :errors])
+   (for [stream [:stdout :stderr]
+         :let [text (get-in result [stream :text])]
+         :when (seq text)]
+     {:tag (name stream) :text text})))
+
 (defn- tool-result [call result]
-  {"role" "tool" "tool_call_id" (:call-id call) "content" (json/write-str result)})
+  {"role" "tool" "tool_call_id" (:call-id call) "content" (result-text result)})
 
 (defn run!
-  "Runs until an answer, denial, diagnostics, or the model-turn cap. approve!
-  receives a frozen proposal and returns an execution/denial result. It may park
-  a worker while the UI owns approval. Original native messages survive the pause."
+  "Runs until an answer, denial, or diagnostics. Every command waits for
+  approve!, so there is no model-turn cap. approve! receives a frozen proposal
+  and returns an execution/denial result. It may park a worker while the UI owns
+  approval. Original native messages survive the pause."
   [workspace task config request! approve!]
   (let [limits (checked-limits (get config :bash-limits {}))
-        payload-limits (payload/checked-limits (get config :payload-limits {}))
-        max-turns (:max-turns config)]
-    (when-not (and (integer? max-turns) (<= 1 max-turns Integer/MAX_VALUE))
-      (throw (ex-info "Supply a finite positive max-turns." {:type :invalid-config :key :max-turns})))
+        payload-limits (payload/checked-limits (get config :payload-limits {}))]
     (when-let [errors (seq (client/config-errors config))]
       (throw (ex-info "Invalid model configuration." {:errors errors})))
-    (loop [blocks [] turns 0 messages [{"role" "system" "content" (str instructions "\nWorkspace: " workspace)}
-                                      {"role" "user" "content" task}]]
-      (if (>= turns max-turns)
-        {:status :stopped :messages messages :errors [{:type :turn-budget-exhausted}]}
-        (let [transport (request! config messages tool-definitions)
-              accepted (when (= :received (:status transport))
-                         (accept-response blocks (:response transport) payload-limits))
-              messages (cond-> messages (:assistant accepted) (conj (:assistant accepted)))]
-          (case (:status accepted)
-            :answer {:status :answer :answer (:answer accepted) :messages messages}
-            (:collecting :approval)
-            (let [script (get-in accepted [:resolved :final])
-                  invalid? (and script (or (str/includes? script (str (char 0)))
-                                          (> (alength (.getBytes ^String script StandardCharsets/UTF_8))
-                                             (:max-script-bytes limits))))
-                  result (when script
-                           (if invalid?
-                             {:status :rejected :executed false :errors [{:type :invalid-script}]}
-                             (approve! {:id (str (random-uuid)) :script script :cwd workspace :limits limits
-                                        :trace (get-in accepted [:resolved :trace])})))
-                  messages (into messages
-                                 (map #(tool-result % (if (= "bash" (:name %)) result
-                                                         {:status :stored :id (get-in % [:arguments "id"]) :executed false})))
-                                 (:calls accepted))]
-              (if (#{:denied :rejected} (:status result))
-                {:status (if (= :denied (:status result)) :denied :stopped)
-                 :messages messages :errors (:errors result)}
-                (recur (:blocks accepted) (inc turns) messages)))
-            {:status :stopped :messages messages :errors (or (:errors accepted) (:errors transport))}))))))
+    (loop [blocks [] messages [{"role" "system" "content" (str instructions "\nWorkspace: " workspace)}
+                               {"role" "user" "content" task}]]
+      (let [transport (request! config messages tool-definitions)
+            accepted (when (= :received (:status transport))
+                       (accept-response blocks (:response transport) payload-limits))
+            messages (cond-> messages (:assistant accepted) (conj (:assistant accepted)))]
+        (case (:status accepted)
+          :answer {:status :answer :answer (:answer accepted) :messages messages}
+          (:collecting :approval)
+          (let [script (get-in accepted [:resolved :final])
+                invalid? (and script (or (str/includes? script (str (char 0)))
+                                        (> (alength (.getBytes ^String script StandardCharsets/UTF_8))
+                                           (:max-script-bytes limits))))
+                result (when script
+                         (if invalid?
+                           {:status :rejected :executed false :errors [{:type :invalid-script}]}
+                           (approve! {:id (str (random-uuid)) :script script :cwd workspace :limits limits
+                                      :trace (get-in accepted [:resolved :trace])})))
+                messages (into messages
+                               (map #(tool-result % (if (= "bash" (:name %)) result
+                                                       {:status :stored :id (get-in % [:arguments "id"]) :executed false})))
+                               (:calls accepted))]
+            (if (#{:denied :rejected} (:status result))
+              {:status (if (= :denied (:status result)) :denied :stopped)
+               :messages messages :errors (:errors result)}
+              (recur (:blocks accepted) messages)))
+          {:status :stopped :messages messages :errors (or (:errors accepted) (:errors transport))})))))

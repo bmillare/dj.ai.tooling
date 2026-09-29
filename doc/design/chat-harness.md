@@ -54,8 +54,29 @@ access.
   until commit; stale snapshots reject the commit. New files do not need an
   existing snapshot.
 
-Each turn has a **Model / tool trace** with exact message arrays, advertised
-schemas, complete response envelopes, and final workflow replay/results.
+Each turn has a **Model / tool trace** with each request's messages, advertised
+schemas, complete response envelopes, and final workflow replay/results. A
+request shows only what it adds: the first request of a turn shows its system
+message and new user message and names how many earlier-turn messages it
+carries, which are the turns shown above; each later request names how many
+messages it repeats from the request before it and shows the rest, and schemas
+identical to the previous request's read `unchanged`. The harness state keeps
+every exact message array.
+
+Each request also has a **Rendered context**: an approximation of the text the
+model saw and wrote, from `dev/dj/ai/tooling/rendering.clj`. llama.cpp's
+`/apply-template` renders the request's messages and tool schemas with the
+model's own chat template, using the configured `chat_template_kwargs`. The
+generated text is reconstructed by rendering the reply as the next message
+and taking what extends the prompt, through the template's end-of-turn token;
+thinking appears where the template puts it. A reply with tool calls gets
+placeholder tool results, because llama.cpp will not render one as the final
+message. A later request of a turn shows only the text after what the model
+saw and wrote in the request before it, with its full prompt one level down.
+Server-reported prompt, cached, and generated token counts sit above it.
+Rendering runs after each reply off the model loop, and a failure is shown
+rather than stopping the task. Servers without `/apply-template` show that
+failure. An injected `request!` renders nothing unless a `render!` is supplied.
 Definition-only payload turns and edit repair requests become visible as they
 occur. Tool result messages can be inspected in the following request and in
 final workflow replay. Transport failures and protocol diagnostics stay visible.
@@ -71,6 +92,9 @@ tool calls are not replayed into a new tool session. The exact old exchanges
 remain in the trace. Human commit/discard outcomes enter the next request's
 context. Payload and Edit continue to exercise their existing bounded `run!`
 APIs. Bash adds a small, approval-driven continuation loop under `dev`.
+
+Tool results are EDN metadata followed by raw, unescaped Bodies such as
+`<stdout-k3x9>…</stdout-k3x9>`; see tool-results.md.
 
 Within a Bash-enabled task, payload definitions remain immutable across commands.
 The original assistant tool call is retained while waiting for approval, then
@@ -114,8 +138,13 @@ output. Cleanup gets a bounded grace period and forcibly terminates the process
 and observed descendants; escaped/reparented processes are not guaranteed to
 be contained. Pipe readers also honor the deadline. There are no execution
 retries. The model can inspect a failure and propose a new command for approval.
-The existing `:max-turns` budget bounds model requests for the entire task,
-including requests on both sides of approval pauses.
+Bash and Terminal tasks have no model-turn cap: each command waits for a human,
+who can end the task instead. **Stop task**, shown while any task runs, decides
+the task's pending proposals as stopped and prevents its next model request. A
+model request or Terminal wait already in progress finishes first, bounded by
+its own deadline. Stop also ends a loop of calls that need no approval, such as
+definition-only Bash responses or `terminal_screen`. `:max-turns` still bounds
+Payload mode, which has no approvals.
 
 ## Terminal contract
 
@@ -192,6 +221,7 @@ token must not commit it.
 
 HTTP requests use the library's finite deadline, response-byte and token caps;
 payload turns, snapshot sizes, and edit repairs retain their existing bounds.
+Bash and Terminal tasks are bounded by approval and Stop task, not a turn count.
 Messages are capped at 32,000 characters and a conversation at 32 submissions.
 History is not token-trimmed; start a new chat if the model context fills.
 Model responses are non-streaming: the UI updates between requests, at command
@@ -217,7 +247,7 @@ the normal suite requires no running model or browser.
 Bash tests additionally cover exact native continuation, retained definitions,
 atomic malformed-response rejection, denial, stale/duplicate approvals, execution
 errors, concurrent stdout/stderr draining, truncation, closed stdin, timeouts,
-script limits, and model-turn limits. Terminal tests cover atomic call
+script limits, and Stop task with and without a pending proposal. Terminal tests cover atomic call
 validation, approval and denial through the harness, forced sends, the
 Terminals panel, and Terminals surviving a new chat; they skip when tmux is
 absent. Live Chromium checks against local Gemma

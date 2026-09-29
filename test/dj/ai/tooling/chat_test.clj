@@ -148,6 +148,82 @@
           (is (false? (get-in turn [:commands 0 :result :executed]))))
         (is (= 3 @n))))))
 
+(deftest stop-task-ends-a-bash-task-that-needs-no-approval
+  (let [n (atom 0)
+        h (chat/harness "." chat/default-config
+                        (fn [_ _ _]
+                          (swap! n inc) (Thread/sleep 5)
+                          (response nil (call "d" "define_payload" {"id" (str "x" @n) "lang" "text" "body" "x"}))))]
+    (chat/send! h {:mode "chat" :task "Loop" :tools "bash"})
+    (while (< @n 3) (Thread/sleep 5))
+    (is (str/includes? (chat/page h) "@post(&apos;/stop&apos;)"))
+    (chat/stop-task! h)
+    (let [turn (await-idle h)]
+      (is (= :stopped (get-in turn [:result :status])))
+      (is (= :stopped-by-human (get-in turn [:result :errors 0 :type])))
+      (is (not (str/includes? (chat/page h) "@post(&apos;/stop&apos;)"))))
+    (let [stopped-at @n]
+      (Thread/sleep 50)
+      (is (= stopped-at @n) "no request is sent after the stop"))))
+
+(deftest stop-task-decides-a-pending-bash-proposal
+  (let [h (chat/harness "." chat/default-config
+                        (fn [_ _ _] (response nil (call "b" "bash" {"body" "printf never"}))))]
+    (chat/send! h {:mode "chat" :task "Run" :tools "bash"})
+    (await-approval h)
+    (chat/stop-task! h)
+    (let [turn (await-idle h)]
+      (is (= :stopped-by-human (get-in turn [:result :errors 0 :type])))
+      (is (false? (get-in turn [:commands 0 :result :executed]))))))
+
+(deftest trace-shows-only-what-each-request-adds
+  (let [n (atom 0)
+        h (chat/harness "." chat/default-config
+                        (fn [_ _ _]
+                          (if (= 2 (swap! n inc))
+                            (response nil (call "b" "bash" {"body" "printf traced"}))
+                            (response "Done"))))]
+    (chat/send! h {:mode "chat" :task "First message"})
+    (await-idle h)
+    (chat/send! h {:mode "chat" :task "Second message" :tools "bash"})
+    (chat/decide-command! h (get-in (await-approval h) [:proposal :id]) true)
+    (await-idle h)
+    (let [section (second (str/split (chat/page h) #"id=\"turn-1\""))
+          [first-request second-request] (rest (str/split section #"Request \d"))]
+      (is (str/includes? first-request "2 messages from earlier turns, shown above"))
+      (is (not (str/includes? first-request "First message")))
+      (is (str/includes? first-request "Second message"))
+      (is (str/includes? second-request "4 messages from the requests above"))
+      (is (not (str/includes? second-request "Second message")))
+      (is (str/includes? second-request "traced")))
+    (is (= 6 (count (get-in @(:state h) [:turns 1 :exchanges 1 :messages]))) "the exact request is kept")))
+
+(deftest rendered-context-shows-what-each-request-adds
+  (let [n (atom 0)
+        render! (fn [_ messages _ transport]
+                  (let [prompt (apply str (map #(str "<" (get % "role") ">" (get % "content") "<end>\n") messages))]
+                    {:prompt prompt
+                     :output (str "<assistant>" (get-in transport [:response "choices" 0 "message" "content"]) "<end>\n")}))
+        h (chat/harness "." chat/default-config
+                        (fn [_ _ _]
+                          (if (= 1 (swap! n inc))
+                            (response "Looking" (call "b" "bash" {"body" "printf rendered"}))
+                            (response "Done")))
+                        render!)]
+    (chat/send! h {:mode "chat" :task "Render me" :tools "bash"})
+    (chat/decide-command! h (get-in (await-approval h) [:proposal :id]) true)
+    (await-idle h)
+    (let [deadline (+ (System/nanoTime) 5000000000)]
+      (while (and (not (every? :rendered (get-in @(:state h) [:turns 0 :exchanges])))
+                  (< (System/nanoTime) deadline))
+        (Thread/sleep 10)))
+    (let [[first-request second-request] (rest (str/split (chat/page h) #"Request \d"))]
+      (is (str/includes? first-request "&lt;user&gt;Render me&lt;end&gt;"))
+      (is (str/includes? first-request "Model wrote"))
+      (is (str/includes? second-request "characters from the request before …]&lt;tool&gt;"))
+      (is (str/includes? second-request "Full prompt"))
+      (is (str/includes? second-request "Done&lt;end&gt;")))))
+
 (deftest terminal-sends-are-approved-independently-and-the-panel-shows-the-screen
   (if-not (tmux/available?)
     (println "skipping terminal-sends-are-approved-independently-and-the-panel-shows-the-screen: tmux is not installed")
@@ -198,5 +274,5 @@
         (let [turn (await-idle h)]
           (is (= :stopped (get-in turn [:result :status])))
           (is (= :stopped-by-human (get-in turn [:result :errors 0 :type])))
-          (is (str/includes? (chat/page h) "Task stopped at a Terminal send.")))
+          (is (str/includes? (chat/page h) "Task stopped.")))
         (finally (chat/close-terminals! h))))))

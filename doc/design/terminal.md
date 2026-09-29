@@ -782,14 +782,27 @@ part of its plan was refused and re-plans. **Stop task** is a separate
 decision that also stops the task after this response's results are
 collected. This differs from the Bash tool, where denial stops the task.
 
-Instructions text tells the model that Settle is a heuristic, what
+Each result is EDN metadata followed by raw Bodies (`output`, `screen`,
+`stepped-over`, `unseen`); see tool-results.md. Instructions text tells
+the model that format, that Settle is a heuristic, what
 `:foreground` means, what `expect_ms` buys it, that a stale rejection
 contains what it needs, when `force` is the right answer and what the
 better fix is, that it may issue several calls at once but only one send
 per Terminal, and that a truncated Observation names the omitted range.
 
 One Terminal named `main` is opened on the harness's first Terminal task,
-so v1 needs no open tool and no tmux vocabulary in the prompt. The chat
+so v1 needs no open tool and no tmux vocabulary in the prompt.
+
+**Briefing.** The system message ends with each Terminal as it is when the
+task starts: EDN with its `:mark` and `:foreground` (and `:status :exited`
+with `:exit-code` for a dead pane), then its screen as a raw `screen` Body.
+Without it the model's first send had to use mark 0, and a Terminal always
+has output past 0 (at least the shell's first prompt), so every task's
+first send was rejected as `:stale-mark` and cost a request. The briefing
+first waits, for all Terminals at once and at most two seconds, until each
+is quiet, so a prompt still being printed falls under the mark. Output
+that arrives after the briefing is still unseen, and a send over it is
+rejected as before. The chat
 harness gets a "Terminals" panel that shows each Terminal's screen,
 foreground, and the attach command; Terminals belong to the harness and
 survive "New chat". Tools are chosen with a select (None, Bash, Terminal)

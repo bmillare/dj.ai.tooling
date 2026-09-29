@@ -2,16 +2,16 @@
   "Standalone text-resolution tools with flat native string body parameters.
   Collects immutable definitions, resolves text, and returns it. Never executes."
   (:refer-clojure :exclude [run!])
-  (:require [clojure.data.json :as json]
-            [dj.ai.tooling.payload :as payload]
+  (:require [dj.ai.tooling.payload :as payload]
             [dj.ai.tooling.payload.strings :as strings]
             [dj.ai.tooling.local-api.calls :as calls]
-            [dj.ai.tooling.local-api.client :as client]))
+            [dj.ai.tooling.local-api.client :as client]
+            [dj.ai.tooling.tool-result :as tool-result]))
 
 (def ^:private languages (into {} (map (juxt name identity)) (keys strings/safe-string)))
 
 (def instructions
-  "Compose text using define_payload(id, lang, body), then resolve_payload(lang, body). Supply each body directly as a native string parameter, exactly as a file/template; do not JSON-serialize a body yourself, nest an encoded document in it, or calculate outer-language escaping. Use {{id}} as a naked string-value reference; the host supplies quoting for the referring block's lang. To emit literal {{, write \\{{. References may point forward. Definitions are immutable and session-local. You may make calls across several turns. resolve_payload returns text and a trace only; it never executes commands or edits files. Stop after resolution.")
+  "Compose text using define_payload(id, lang, body), then resolve_payload(lang, body). Supply each body directly as a native string parameter, exactly as a file/template; do not JSON-serialize a body yourself, nest an encoded document in it, or calculate outer-language escaping. Use {{id}} as a naked string-value reference; the host supplies quoting for the referring block's lang. To emit literal {{, write \\{{. References may point forward. Definitions are immutable and session-local. You may make calls across several turns. resolve_payload returns text and a trace only; it never executes commands or edits files. Its result is an EDN map, then the final text, unescaped, in a tag such as <final-k3x9>...</final-k3x9>, and each block's resolved text in a tag such as <trace-k3x9 id=\"name\">...</trace-k3x9>: the text starts on the line after the opening tag and ends right before the closing tag, and the tag suffix is a fresh nonce in every result. Stop after resolution.")
 
 (defn- tool [name description fields]
   {"type" "function"
@@ -90,15 +90,18 @@
 
 (defn tool-results
   "Correlates results with native call IDs. Final text is returned only to the
-  top-level call; definition acknowledgments don't echo bodies. Rejections are atomic."
+  top-level call, as a raw `final` Body with one `trace` Body per resolved
+  block; definition acknowledgments don't echo bodies. Rejections are atomic."
   [{:keys [status calls state errors]}]
   (mapv (fn [{:keys [call-id name arguments]}]
           {"role" "tool" "tool_call_id" call-id
-           "content" (json/write-str
-                      (cond
-                        (= :rejected status) {:status :rejected :executed false :errors errors}
-                        (= name "define_payload") {:status :stored :id (get arguments "id") :executed false}
-                        :else (merge {:status :resolved :executed false} (:result state))))}) calls))
+           "content" (cond
+                       (= :rejected status) (tool-result/render [[:status :rejected] [:executed false] [:errors errors]] [])
+                       (= name "define_payload") (tool-result/render [[:status :stored] [:id (get arguments "id")] [:executed false]] [])
+                       :else (let [{:keys [final trace]} (:result state)]
+                               (tool-result/render [[:status :resolved] [:executed false]]
+                                                   (cons {:tag "final" :text final}
+                                                         (for [[id text] trace] {:tag "trace" :attrs [[:id id]] :text text})))))}) calls))
 
 (defn run!
   "Bounded API consumer. Config uses client limits plus positive :max-turns and

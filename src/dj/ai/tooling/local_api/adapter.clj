@@ -1,8 +1,8 @@
 (ns dj.ai.tooling.local-api.adapter
   "Pure structured-call decoding, proposal revision, and staging feedback.
   Wire maps use string keys; proposal maps use keywords."
-  (:require [clojure.data.json :as json]
-            [dj.ai.tooling.local-api.calls :as calls]))
+  (:require [dj.ai.tooling.local-api.calls :as calls]
+            [dj.ai.tooling.tool-result :as tool-result]))
 
 (def repairable-errors #{:search-not-found :search-not-unique})
 
@@ -91,16 +91,25 @@
                  (into #{} (keep #(when (= :failed (:status %)) (:patch-id %))) evaluations)
                  #{})}))
 
+(defn- without-search
+  "An error without `:search`: the model's own search text, which it sent
+  as a raw argument and would otherwise read back escaped."
+  [error]
+  (dissoc error :search))
+
 (defn tool-results
-  "One correlated result per call, with both call and proposal identities."
+  "One correlated result per call, with both call and proposal identities,
+  as EDN (see dj.ai.tooling.tool-result)."
   [calls feedback]
-  (let [by-id (into {} (map (juxt :patch-id identity)) (:evaluations feedback))]
+  (let [evaluations (mapv #(cond-> % (:error %) (update :error without-search)) (:evaluations feedback))
+        by-id (into {} (map (juxt :patch-id identity)) evaluations)]
     (mapv (fn [{:keys [call-id patch]}]
             {"role" "tool" "tool_call_id" call-id
-             "content" (json/write-str
-                        {:committed false :message "No files have been committed."
-                         :proposal-status (:status feedback)
-                         :eligible-patch-ids (vec (sort (:eligible feedback)))
-                         :patch (get by-id (:patch-id patch))
-                         :errors (:errors feedback)
-                         :evaluations (:evaluations feedback)})}) calls)))
+             "content" (tool-result/render
+                        [[:committed false] [:message "No files have been committed."]
+                         [:proposal-status (:status feedback)]
+                         [:eligible-patch-ids (vec (sort (:eligible feedback)))]
+                         [:patch (get by-id (:patch-id patch))]
+                         [:errors (mapv without-search (:errors feedback))]
+                         [:evaluations evaluations]]
+                        [])}) calls)))

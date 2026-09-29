@@ -3,7 +3,8 @@
             [clojure.test :refer [deftest is]]
             [dj.ai.tooling.local-api.adapter-test :refer [call response]]
             [dj.ai.tooling.local-api.payload :as api]
-            [dj.ai.tooling.local-api.workflow-test :refer [config scripted]]))
+            [dj.ai.tooling.local-api.workflow-test :refer [config scripted]]
+            [dj.ai.tooling.tool-result :as tool-result]))
 
 (defn define [call-id id lang body]
   (call call-id "define_payload" {"id" id "lang" lang "body" body}))
@@ -22,13 +23,13 @@
                        (define "d" "code" "python" body))
         result (api/accept-response (api/initial-state) wire)
         results (api/tool-results result)
-        resolved (json/read-str (get-in results [0 "content"]))]
+        resolved (tool-result/parse (get-in results [0 "content"]))]
     (is (= :resolved (:status result)))
     (is (= body (get-in result [:state :blocks 0 :body])))
-    (is (= body (get (json/read-str (get resolved "final")) "script")))
+    (is (= body (get (json/read-str (get-in resolved [:bodies 0 :text])) "script")))
     (is (= ["r" "d"] (mapv #(get % "tool_call_id") results)))
-    (is (= false (get resolved "executed")))
-    (is (= [["code" body]] (get resolved "trace")))
+    (is (= {:status :resolved :executed false} (:metadata resolved)))
+    (is (= [{:tag "trace" :attrs {:id "code"} :text body}] (rest (:bodies resolved))))
     (is (= (get-in wire ["choices" 0 "message"]) (:assistant result)))))
 
 (deftest forward-references-across-turns
@@ -52,7 +53,7 @@
       (let [result (api/accept-response state (apply response calls))]
         (is (= :rejected (:status result)))
         (is (= state (:state result)))
-        (is (every? #(= "rejected" (get (json/read-str (get % "content")) "status")) (api/tool-results result)))))
+        (is (every? #(= :rejected (get-in (tool-result/parse (get % "content")) [:metadata :status])) (api/tool-results result)))))
     (let [truncated (assoc-in (response (define "b" "new" "text" "new")) ["choices" 0 "finish_reason"] "length")]
       (is (= state (:state (api/accept-response state truncated)))))))
 

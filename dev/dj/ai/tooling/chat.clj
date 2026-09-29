@@ -7,6 +7,7 @@
             [dj.ai.tooling.dogfood :as dogfood]
             [dj.ai.tooling.edit :as edit]
             [dj.ai.tooling.markdown :as md]
+            [dj.ai.tooling.rendering :as rendering]
             [dj.ai.tooling.local-api.calls :as calls]
             [dj.ai.tooling.local-api.client :as client]
             [dj.ai.tooling.local-api.payload :as payload]
@@ -25,6 +26,8 @@
 (def default-config
   {:base-url "http://localhost:17070/v1" :model "/home/brent/projects2/genai_models/Qwen3.8-27B-UD-Q6_K_XL.gguf"
    :timeout-ms 120000 :max-response-bytes 1048576 :max-tokens 4096
+   ;; :max-turns bounds Payload mode only; Bash and Terminal tasks wait for
+   ;; approval and have Stop task instead.
    :repair-turn-budget 2 :max-turns 8
    :bash-limits bash/default-limits
    :terminal-limits terminal/default-limits
@@ -46,10 +49,15 @@
      :limits (:terminal-limits config)}))
 
 (defn harness
-  "Create isolated harness state; request! is injectable for deterministic tests."
-  ([workspace config] (harness workspace config client/complete!))
-  ([workspace config request!]
-   {:workspace (.getCanonicalPath (java.io.File. workspace)) :config config :request! request!
+  "Create isolated harness state; request! is injectable for deterministic tests.
+  render! approximates the text the model saw and wrote for one request (see
+  dj.ai.tooling.rendering); an injected request! renders nothing unless a
+  render! is supplied too."
+  ([workspace config] (harness workspace config client/complete! rendering/render-exchange!))
+  ([workspace config request!] (harness workspace config request! nil))
+  ([workspace config request! render!]
+   {:workspace (.getCanonicalPath (java.io.File. workspace)) :config config
+    :request! request! :render! render!
     :desk (desk config)
     :state (atom (assoc (initial-state) :terminals {})) :subscriptions (subscribed/registry)}))
 
@@ -68,7 +76,10 @@
     (change! h update-in [:turns turn-id :commands] (fnil conj [])
              {:proposal proposal :decision decision :status :approval})
     (let [decision @decision
-          result (if (= :approved decision) (bash/execute! proposal) {:status :denied :executed false})]
+          result (case decision
+                   :approved (bash/execute! proposal)
+                   :stopped {:status :stopped :executed false}
+                   {:status :denied :executed false})]
       (change! h update-in [:turns turn-id :commands index]
                #(-> % (dissoc :decision) (assoc :status (:status result) :result result)))
       result)))
@@ -141,6 +152,21 @@
         (deliver (:decision command) decision))))
   {:status 204})
 
+(defn stop-task!
+  "Stops the running task: every pending proposal of it is decided
+  `:stopped`, and its next model request is not sent. A request already
+  waiting on the model, or a Terminal wait in progress, finishes first."
+  [{:keys [state] :as h}]
+  (locking state
+    (when (:busy? @state)
+      (let [turn (last (:turns @state))]
+        (change! h assoc-in [:turns (:id turn) :stop?] true)
+        (doseq [[i command] (map-indexed vector (:commands turn))
+                :when (= :approval (:status command))]
+          (change! h assoc-in [:turns (:id turn) :commands i :status] :stopped)
+          (deliver (:decision command) :stopped)))))
+  {:status 204})
+
 (defn- run-terminal-task! [{:keys [desk] :as h} id task config traced!]
   (let [opened (ensure-main! h)]
     (if (= :rejected (:status opened))
@@ -150,15 +176,22 @@
         (doseq [terminal (vals (terminals h))] (refresh-terminal! h terminal))
         result))))
 
-(defn- run-turn! [{:keys [workspace config request!] :as h} id mode task paths history tools]
+(defn- run-turn! [{:keys [workspace config request! render!] :as h} id mode task paths history tools]
   (let [traced! (fn [config messages tools]
+                  (when (get-in @(:state h) [:turns id :stop?])
+                    (throw (ex-info "The human stopped this task." {:type :stopped-by-human})))
                   (let [messages (into [(first messages)] (concat history (rest messages)))
                         index (count (get-in @(:state h) [:turns id :exchanges]))]
                     (change! h update-in [:turns id :exchanges] conj
-                             {:messages messages :tools tools :status :waiting})
+                             {:messages messages :history-count (count history) :tools tools :status :waiting})
                     (let [result (request! config messages tools)]
                       (change! h update-in [:turns id :exchanges index]
                                merge {:status (:status result) :transport result})
+                      ;; Off the model loop: the next request need not wait for it.
+                      (when render!
+                        (future
+                          (let [rendered (render! config messages tools result)]
+                            (change! h assoc-in [:turns id :exchanges index :rendered] rendered))))
                       result)))
         result (try
                  (case mode
@@ -188,7 +221,7 @@
                   :ready "An edit proposal is staged, awaiting human review."
                   :denied "The human denied the proposed command; this task stopped."
                   :stopped (if (= :stopped-by-human (get-in result [:errors 0 :type]))
-                             "The human stopped this task at a Terminal send."
+                             "The human stopped this task."
                              (str "Stopped: " (pr-str (:errors result))))
                   (str "Stopped: " (pr-str (:errors result))))
         diff (when (= :ready (:status result))
@@ -330,17 +363,76 @@
                                  (when exit-code (str " · exit " exit-code)))]
         [:pre screen]])]))
 
-(defn- turn-view [{:keys [id token task mode paths exchanges result diff review commands tools]}]
+(defn- exchange-view
+  "What one request added: the first request of a turn omits the earlier
+  turns' dialogue, which is shown above; a later one omits the messages of
+  the request before it. `:exchanges` keeps the exact arrays."
+  [previous {:keys [messages history-count tools] :as exchange}]
+  (let [shared (cond
+                 (nil? previous) (inc (or history-count 0))
+                 (= (:messages previous) (take (count (:messages previous)) messages)) (count (:messages previous))
+                 :else 0)]
+    ;; Built in order so the omission notes print before the messages.
+    (cond-> (array-map :status (:status exchange))
+      (and (nil? previous) (pos? (or history-count 0)))
+      (assoc :earlier-turns (str history-count " messages from earlier turns, shown above"))
+      (and previous (pos? shared)) (assoc :earlier-requests (str shared " messages from the requests above"))
+      (nil? previous) (assoc :system (first messages))
+      true (assoc :new-messages (vec (drop shared messages))
+                  :tools (if (and previous (= tools (:tools previous))) "unchanged" tools))
+      (contains? exchange :transport) (assoc :transport (:transport exchange)))))
+
+(defn- usage-line
+  "Token counts the server reported for one request; llama.cpp's
+  `cache_n` is the prompt tokens reused from the previous request."
+  [transport]
+  (let [{:strs [usage timings]} (:response transport)]
+    (str/join " · " (cond-> []
+                      (get usage "prompt_tokens") (conj (str (get usage "prompt_tokens") " prompt tokens"))
+                      (get timings "cache_n") (conj (str (get timings "cache_n") " reused from cache"))
+                      (get usage "completion_tokens") (conj (str (get usage "completion_tokens") " generated tokens"))))))
+
+(defn- rendered-view
+  "The approximate text the model saw and wrote for one request. A later
+  request of a turn shows only what follows the text the model saw and
+  wrote in the request before it; its full prompt is one level down."
+  [id i previous {:keys [rendered transport]}]
+  (let [{:keys [prompt output errors]} rendered
+        seen (when-let [{:keys [prompt output]} (:rendered previous)] (str prompt output))
+        shared (if seen (rendering/common-prefix-length seen prompt) 0)]
+    [:section
+     [:p {:class "badge"} "Rendered context · approximate"]
+     [:small {:class "muted"} (str (usage-line transport) (when prompt (str " · prompt " (count prompt) " chars")))]
+     (cond
+       errors [:pre (pretty errors)]
+       (nil? rendered) [:p {:class "muted"} "Rendering…"]
+       :else
+       [:div
+        [:p (if (pos? shared) "Model sees, after what it already saw and wrote in the request before" "Model sees")]
+        [:pre (if (pos? shared)
+                (str "[… " shared " characters from the request before …]" (subs prompt shared))
+                prompt)]
+        (when (pos? shared)
+          [:details {:id (str "prompt-" id "-" i) :data-preserve-attr "open"}
+           [:summary "Full prompt"] [:pre prompt]])
+        (when output [:div [:p "Model wrote"] [:pre output]])])]))
+
+(defn- turn-view [busy? {:keys [id token task mode paths exchanges result diff review commands tools stop?]}]
   [:article {:id (str "turn-" id)}
    [:div {:class "user"} [:div {:class "label"} (str "You · " mode (case tools "bash" " + Bash" "terminal" " + Terminal" nil))] [:div {:class "text"} task]
     (when (seq paths) [:p {:class "muted"} (str "Files: " (str/join ", " paths))])]
    [:div {:class "assistant"}
     [:div {:class "label"} "Assistant"]
-    (when-not result [:p {:role "status"} (if (some #(= :approval (:status %)) commands)
-                                                   "Waiting for command approval…" "Working…")])
+    (when-not result
+      [:div {:class "actions"}
+       [:p {:role "status"} (cond stop? "Stopping…"
+                                  (some #(= :approval (:status %)) commands) "Waiting for command approval…"
+                                  :else "Working…")]
+       (when (and busy? (not stop?))
+         [:button {:class "secondary" "data-on:click" "@post('/stop')"} "Stop task"])])
     (map command-view commands)
     (when (= :denied (:status result)) [:p "Command denied. Task stopped."])
-    (when (= :stopped-by-human (get-in result [:errors 0 :type])) [:p "Task stopped at a Terminal send."])
+    (when (= :stopped-by-human (get-in result [:errors 0 :type])) [:p "Task stopped."])
     (when-let [answer (:answer result)]
       (let [{:keys [html error]} (md/render answer)]
         [:div {:class "markdown"}
@@ -362,9 +454,14 @@
     (when (seq exchanges)
       [:details {:id (str "trace-" id) :data-preserve-attr "open"}
        [:summary (str "Model / tool trace · " (count exchanges) " request(s)")]
-       (for [[i exchange] (map-indexed vector exchanges)]
-         (inspect (str "exchange-" id "-" i) (str "Request " (inc i) " · " (name (:status exchange))) exchange))
-       (when result (inspect (str "replay-" id) "Workflow replay and result" result))])]])
+       (for [[i exchange] (map-indexed vector exchanges)
+             :let [previous (when (pos? i) (nth exchanges (dec i)))]]
+         [:details {:id (str "exchange-" id "-" i) :data-preserve-attr "open"}
+          [:summary (str "Request " (inc i) " · " (name (:status exchange)))]
+          (when (contains? exchange :rendered) (rendered-view id i previous exchange))
+          (inspect (str "wire-" id "-" i) "Wire request and response" (exchange-view previous exchange))])
+       ;; The task's messages are the requests above; show the rest of the result.
+       (when result (inspect (str "replay-" id) "Workflow replay and result" (dissoc result :messages)))])]])
 
 (def styles
   "*{box-sizing:border-box}body{margin:0;background:#111519;color:#e6e9ed;font:16px/1.55 system-ui,sans-serif}main{max-width:940px;margin:auto;padding:32px 22px 60px}header,.actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap}header{justify-content:space-between;border-bottom:1px solid #303840;padding-bottom:20px}h1{font-size:22px;margin:0}.muted,.label,summary{color:#a8b6c3}.label{font-size:12px;text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px}article{margin:28px 0}.user{background:#202c36;border-radius:12px;padding:18px 22px;margin-left:8%}.assistant{padding:22px 0}.text{white-space:pre-wrap;overflow-wrap:anywhere}.markdown{overflow-wrap:anywhere;min-width:0}.markdown>:first-child{margin-top:0}.markdown>:last-child{margin-bottom:0}.markdown h1{font-size:1.6em}.markdown h2{font-size:1.35em}.markdown h3{font-size:1.15em}.markdown code{font:0.9em ui-monospace,monospace;background:#202c36;border-radius:4px;padding:.15em .3em}.markdown pre code{background:none;padding:0;font:inherit}.markdown pre{white-space:pre;overflow:auto}.markdown blockquote{border-left:3px solid #455460;margin:1em 0;padding-left:1em;color:#a8b6c3}.markdown table{display:block;max-width:100%;overflow:auto;border-collapse:collapse}.markdown th,.markdown td{border:1px solid #455460;padding:.45em .7em;text-align:left}.markdown img{max-width:100%;height:auto}.markdown hr{border:0;border-top:1px solid #455460}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#0b1014;border:1px solid #303840;border-radius:8px;padding:16px;font:13px/1.6 ui-monospace,monospace;max-height:540px;overflow:auto}details{margin:14px 0}summary{cursor:pointer}button,select,input,textarea{font:inherit;color:inherit;background:#1c252d;border:1px solid #455460;border-radius:8px;padding:10px 14px}button{cursor:pointer;background:#a6dfc0;color:#10271b;font-weight:650}.secondary{background:#202c36;color:#e6e9ed}button:disabled{opacity:.45;cursor:default}textarea{display:block;width:100%;resize:vertical;margin:8px 0 14px}label{display:block}.composer{border-top:1px solid #303840;padding-top:22px}.badge{color:#a6dfc0}small{font-size:12px}.empty{padding:45px 0}.notice{color:#ffcb8b}a{color:#a6dfc0}@media(max-width:600px){main{padding:20px 14px}.user{margin-left:0}header{align-items:flex-start}}")
@@ -381,7 +478,7 @@
        [:div {:class "empty"} [:h2 "Try the tooling patterns"]
         [:p "Chat normally, compose text with Payload, or propose file changes with Edit."]
         [:p {:class "muted"} "Open a turn’s trace to inspect exact model requests, tool calls, and results."]])
-     (map turn-view turns)
+     (map (partial turn-view busy?) turns)
      (terminals-view h)
      (when notice [:p {:class "notice" :role "alert"} notice])
      [:section {:class "composer" :data-signals__ifmissing (str "{mode: 'chat', paths: '', tools: 'none', " signal ": ''}")}
@@ -437,6 +534,7 @@
         [:post "/run-command"] (decide-command! h (get-in request [:query-params "id"]) true)
         [:post "/deny-command"] (decide-command! h (get-in request [:query-params "id"]) false)
         [:post "/stop-command"] (decide-command! h (get-in request [:query-params "id"]) :stopped)
+        [:post "/stop"] (stop-task! h)
         [:post "/commit"] (review! h (get-in request [:query-params "id"]) true)
         [:post "/discard"] (review! h (get-in request [:query-params "id"]) false)
         response/not-found)

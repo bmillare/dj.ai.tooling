@@ -6,10 +6,11 @@
   is doc/design/terminal.md; this namespace only maps tool calls onto
   dj.ai.tooling.terminal and carries results back as JSON."
   (:refer-clojure :exclude [run!])
-  (:require [clojure.data.json :as json]
+  (:require [clojure.string :as str]
             [dj.ai.tooling.local-api.calls :as calls]
             [dj.ai.tooling.local-api.client :as client]
-            [dj.ai.tooling.terminal :as terminal]))
+            [dj.ai.tooling.terminal :as terminal]
+            [dj.ai.tooling.tool-result :as tool-result]))
 
 (def default-maxima
   "Ceiling for the `expect_ms` and `min_wait_ms` a model may ask for."
@@ -24,7 +25,7 @@
   {:min-wait-ms 1000 :expect-ms 30000 :growth 2})
 
 (def instructions
-  "You have a Terminal named main: a real shell that keeps its state between calls, in the configured workspace. terminal_send(terminal, text, mark, expect_ms, min_wait_ms) pastes text as one unit, presses Enter, waits, and returns what printed; terminal_keys(terminal, keys, mark, expect_ms, min_wait_ms) does the same for named keys such as Up, Enter, C-c, C-d, or literal strings. Both need human approval and run only after it. expect_ms is the longest you are willing to wait (default 30000): the result is status settled when the Terminal went quiet, timed-out when it was still busy after expect_ms (the command is still running; the result shows what printed so far), or exited with an exit code. Quiet is judged over a fraction of a second, so a command that is silent before it prints settles too early; min_wait_ms (default 1000) is how long you expect that silence to last, and settled is not reported before it. While the foreground program differs from the one you typed at, the harness knows the command is still running and keeps waiting on its own with a doubling window, up to expect_ms; the result's verdict says running when it did that and unknown when it could not tell, and floor_ms is the last window it used. For a timed-out or too-early result, terminal_await(terminal, mark, expect_ms, min_wait_ms) waits again from a mark, continuing the doubling where it left off unless you give numbers, and terminal_interrupt(terminal) sends Ctrl-C without approval. Every result carries a clock: at is when it was taken, waited_ms how long the call waited, since_send_ms how long ago you last sent to that Terminal. Read it: a command that should have finished long ago has not, so stop waiting and change course rather than wait again. Every result carries mark, the point you have seen up to; always pass the latest mark for that Terminal to the next call. A send with an old mark is rejected as stale, and the rejection carries the unseen output as observation, so read it and resend with the new mark. If the same noise keeps arriving from a background job, resend with force true: the send is typed anyway and the result includes what you stepped over; the real fix is to redirect that job's output to a file or stop it. Quiet is a heuristic, not completion: foreground names the program the Terminal is running (bash usually means a prompt is waiting; python3 means a REPL or a program reading stdin; a compiler may just be busy). When you cannot tell whether a shell or REPL is listening, probe it: send a line with a known reply and a nonce, led by a space so it stays out of history, such as \" echo probe-7f3a\" at a shell or \"print('probe-7f3a')\" at Python; the nonce alone on its own line after your send is the reply, the echoed command text is not, and no reply within expect_ms means the program is still busy. Never probe a Terminal whose last lines look like a question or a prompt for input, because the probe becomes the answer. Output is what a person would see: your echoed input, prompts, and redraws; long output keeps its head and tail with one marker line naming the omitted transcript range. terminal_screen(terminal) returns the current screen for programs that draw. You may make several calls in one response and they run at the same time, but only one send per Terminal per response: put a sequence of commands for one Terminal in one multi-line text. A denied send returns status denied and you may continue with the rest. Never claim a command ran before its tool result.")
+  "You have a Terminal named main: a real shell that keeps its state between calls, in the configured workspace. This message ends with each Terminal as it is now: its :mark, its :foreground, and its screen; use that :mark in your first call to it. terminal_send(terminal, text, mark, expect_ms, min_wait_ms) pastes text as one unit, presses Enter, waits, and returns what printed; terminal_keys(terminal, keys, mark, expect_ms, min_wait_ms) does the same for named keys such as Up, Enter, C-c, C-d, or literal strings. Both need human approval and run only after it. A result is an EDN map of metadata, then the Terminal's text, unescaped, in tags such as <output-k3x9>...</output-k3x9>: the text starts on the line after the opening tag and ends right before the closing tag, so a prompt waiting for input ends at the closing tag, and the tag suffix is a fresh nonce in every result. expect_ms is the longest you are willing to wait (default 30000): the result's :status is :settled when the Terminal went quiet, :timed-out when it was still busy after expect_ms (the command is still running; the output shows what printed so far), or :exited with an :exit-code. Quiet is judged over a fraction of a second, so a command that is silent before it prints settles too early; min_wait_ms (default 1000) is how long you expect that silence to last, and :settled is not reported before it. While the foreground program differs from the one you typed at, the harness knows the command is still running and keeps waiting on its own with a doubling window, up to expect_ms; the result's :verdict is :running when it did that and :unknown when it could not tell, and :floor-ms is the last window it used. For a timed-out or too-early result, terminal_await(terminal, mark, expect_ms, min_wait_ms) waits again from a mark, continuing the doubling where it left off unless you give numbers, and terminal_interrupt(terminal) sends Ctrl-C without approval. Every result carries a clock: :at is when it was taken, :waited-ms how long the call waited, :since-send-ms how long ago you last sent to that Terminal. Read it: a command that should have finished long ago has not, so stop waiting and change course rather than wait again. Every result carries :mark, the point you have seen up to; always pass the latest mark for that Terminal to the next call. A send with an old mark is rejected as :stale-mark: the rejection carries the new :mark in its :observation and the unseen output in an unseen tag, so read it and resend with the new mark. If the same noise keeps arriving from a background job, resend with force true: the send is typed anyway and the result includes what you stepped over in a stepped-over tag; the real fix is to redirect that job's output to a file or stop it. Quiet is a heuristic, not completion: :foreground names the program the Terminal is running (bash usually means a prompt is waiting; python3 means a REPL or a program reading stdin; a compiler may just be busy). When you cannot tell whether a shell or REPL is listening, probe it: send a line with a known reply and a nonce, led by a space so it stays out of history, such as \" echo probe-7f3a\" at a shell or \"print('probe-7f3a')\" at Python; the nonce alone on its own line after your send is the reply, the echoed command text is not, and no reply within expect_ms means the program is still busy. Never probe a Terminal whose last lines look like a question or a prompt for input, because the probe becomes the answer. Output is what a person would see: your echoed input, prompts, and redraws; long output keeps its head and tail with one marker line naming the omitted transcript range. terminal_screen(terminal) returns the current screen, in a screen tag, for programs that draw. You may make several calls in one response and they run at the same time, but only one send per Terminal per response: put a sequence of commands for one Terminal in one multi-line text. A denied send returns :status :denied and you may continue with the rest. Never claim a command ran before its tool result.")
 
 (defn- object [required properties]
   {"type" "object" "additionalProperties" false "required" required "properties" properties})
@@ -267,11 +268,64 @@
                       calls)]
     (mapv deref futures)))
 
+(def ^:private key-order
+  [:status :terminal :form :from :mark :foreground :exit-code :verdict :floor-ms
+   :waited-ms :since-send-ms :at :truncated? :omitted :forced? :stepped-over :errors])
+
+(defn- observation-metadata
+  "An Observation without its text, nil values, or `:truncated?` and
+  `:omitted` when nothing was cut."
+  [observation]
+  (into {} (remove (comp nil? val))
+        (cond-> (dissoc observation :output :screen)
+          (not (:truncated? observation)) (dissoc :truncated? :omitted))))
+
+(defn result-text
+  "The model-facing text of a Terminal tool result: EDN metadata, then its
+  text as raw Bodies: `output`, `screen`, `stepped-over` for what a forced
+  send typed past, and `unseen` for the output a stale send was rejected
+  over."
+  [result]
+  (let [errors (:errors result)
+        metadata (cond-> (observation-metadata result)
+                   (:stepped-over result) (update :stepped-over observation-metadata)
+                   errors (assoc :errors (mapv #(cond-> % (:observation %) (update :observation observation-metadata))
+                                               errors)))]
+    (tool-result/render
+     (map (fn [[k v]] [k (if (map? v) (into (sorted-map) v) v)])
+          (tool-result/ordered metadata key-order))
+     (concat [{:tag "output" :text (:output result)}
+              {:tag "screen" :text (:screen result)}
+              {:tag "stepped-over" :text (get-in result [:stepped-over :output])}]
+             (for [error errors] {:tag "unseen" :text (get-in error [:observation :output])})))))
+
+(defn briefing
+  "Each Terminal as it is now, for the start of a task: EDN with its
+  `:mark` and `:foreground`, then its screen as a raw Body. Waits first,
+  for all Terminals at once, until each goes quiet, so a prompt still
+  being printed is under the mark rather than unseen output past it."
+  [desk terminals]
+  (str/join
+   "\n"
+   (pmap
+    (fn [[name terminal]]
+      (let [quiet (terminal/await desk terminal (:mark (terminal/state desk terminal)) {:timeout-ms 2000})
+            state (terminal/state desk terminal)
+            screen (terminal/screen desk terminal)]
+        (if (= :rejected (:status state))
+          (tool-result/render [[:terminal name] [:errors (:errors state)]] [])
+          (tool-result/render [[:terminal name] [:status (when (= :exited (:status state)) :exited)]
+                               [:mark (:mark state)] [:foreground (:foreground state)] [:exit-code (:exit-code state)]
+                               [:errors (when (= :rejected (:status quiet)) (:errors quiet))]]
+                              [{:tag "screen" :text (:screen screen)}]))))
+    (sort-by key terminals))))
+
 (defn- tool-result [call result]
-  {"role" "tool" "tool_call_id" (:call-id call) "content" (json/write-str result)})
+  {"role" "tool" "tool_call_id" (:call-id call) "content" (result-text result)})
 
 (defn run!
-  "Runs until an answer, a human stop, diagnostics, or the model-turn cap.
+  "Runs until an answer, a human stop, or diagnostics. There is no
+  model-turn cap: sends wait for a human, who may stop the task.
   `terminals` maps names to Terminal values; `approve!` receives a frozen
   proposal and returns the performed result, a denial, or a stop, and may
   park its thread while a UI owns the decision. Several proposals may be
@@ -279,27 +333,21 @@
   [desk terminals task config request! approve!]
   (let [policy {:maxima (merge default-maxima (:terminal-maxima config))
                 :defaults (merge default-defaults (:terminal-defaults config))}
-        memory (atom {})
-        max-turns (:max-turns config)]
-    (when-not (and (integer? max-turns) (<= 1 max-turns Integer/MAX_VALUE))
-      (throw (ex-info "Supply a finite positive max-turns." {:type :invalid-config :key :max-turns})))
+        memory (atom {})]
     (when-let [errors (seq (client/config-errors config))]
       (throw (ex-info "Invalid model configuration." {:errors errors})))
-    (loop [turns 0
-           messages [{"role" "system" "content" (str instructions "\nTerminals: " (pr-str (vec (clojure.core/keys terminals))))}
+    (loop [messages [{"role" "system" "content" (str instructions "\n\nTerminals, as they are now:\n" (briefing desk terminals))}
                      {"role" "user" "content" task}]]
-      (if (>= turns max-turns)
-        {:status :stopped :messages messages :errors [{:type :turn-budget-exhausted}]}
-        (let [transport (request! config messages tool-definitions)
-              accepted (when (= :received (:status transport))
-                         (accept-response (:response transport)))
-              messages (cond-> messages (:assistant accepted) (conj (:assistant accepted)))]
-          (case (:status accepted)
-            :answer {:status :answer :answer (:answer accepted) :messages messages}
-            :calls (let [calls (:calls accepted)
-                         results (execute-all! desk terminals policy memory approve! calls)
-                         messages (into messages (map tool-result calls results))]
-                     (if (some #(= :stopped (:status %)) results)
-                       {:status :stopped :messages messages :errors [{:type :stopped-by-human}]}
-                       (recur (inc turns) messages)))
-            {:status :stopped :messages messages :errors (or (:errors accepted) (:errors transport))}))))))
+      (let [transport (request! config messages tool-definitions)
+            accepted (when (= :received (:status transport))
+                       (accept-response (:response transport)))
+            messages (cond-> messages (:assistant accepted) (conj (:assistant accepted)))]
+        (case (:status accepted)
+          :answer {:status :answer :answer (:answer accepted) :messages messages}
+          :calls (let [calls (:calls accepted)
+                       results (execute-all! desk terminals policy memory approve! calls)
+                       messages (into messages (map tool-result calls results))]
+                   (if (some #(= :stopped (:status %)) results)
+                     {:status :stopped :messages messages :errors [{:type :stopped-by-human}]}
+                     (recur messages)))
+          {:status :stopped :messages messages :errors (or (:errors accepted) (:errors transport))})))))

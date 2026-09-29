@@ -172,7 +172,8 @@ unchanged; only function argument JSON is decoded into patches.
 `:unevaluated` patch evaluations. `:passed` means that the exact-search step
 passed; final-content errors can still stop the whole proposal. A feedback
 status of `:repair` includes the eligible patch IDs. Tool results contain all
-patch evaluations, proposal-wide errors, and `committed: false`.
+patch evaluations, proposal-wide errors, and `:committed false`, as EDN (see
+tool-results.md); errors omit `:search`, which is the model's own argument.
 
 `workflow/run!` takes a workspace, selectors, task string, and configuration. Its fifth
 argument optionally injects a request function with `client/complete!`'s

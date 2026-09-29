@@ -179,7 +179,8 @@ Start a new session to replace definitions or change the basis of composition.
 A definition-only response returns `:collecting`; acknowledgments identify
 stored IDs without echoing large bodies. A top-level body returns `:resolved`,
 with `{:final ... :trace ...}` under the returned state's `:result`. Only the
-top-level call's result includes this text. Results explicitly state `executed: false`.
+top-level call's result includes this text, as raw `final` and `trace` Bodies
+(see tool-results.md). Results explicitly state `:executed false`.
 A no-call answer terminates the session as `:answer`. Malformed responses,
 transport failures, resolution errors, or exhausted turns stop the automatic
 workflow with diagnostics. There is no automatic repair or execution loop.

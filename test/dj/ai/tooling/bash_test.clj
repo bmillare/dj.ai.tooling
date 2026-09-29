@@ -1,9 +1,9 @@
 (ns dj.ai.tooling.bash-test
-  (:require [clojure.data.json :as json]
-            [clojure.test :refer [deftest is]]
+  (:require [clojure.test :refer [deftest is]]
             [dj.ai.tooling.bash :as bash]
             [dj.ai.tooling.chat :as chat]
-            [dj.ai.tooling.chat-test :refer [response call]]))
+            [dj.ai.tooling.chat-test :refer [response call]]
+            [dj.ai.tooling.tool-result :as tool-result]))
 
 (defn execute [script & [limits]]
   (bash/execute! {:script script :cwd "." :limits (merge bash/default-limits limits)}))
@@ -69,19 +69,24 @@
     (is (= ["system" "user" "assistant" "tool" "tool"]
            (mapv #(get % "role") (second @requests))))
     (is (= ["d" "b"] (mapv #(get % "tool_call_id") (take-last 2 (second @requests)))))
-    (is (= "a'b\n" (get-in (json/read-str (get (last (second @requests)) "content")) ["stdout" "text"])))
+    (is (= [{:tag "stdout" :attrs {} :text "a'b\n"}] (:bodies (tool-result/parse (get (last (second @requests)) "content")))))
     (is (= 8 (count (:messages result))))))
 
-(deftest denial-and-turn-budget-stop-automation
+(deftest denial-stops-automation
   (let [requests (atom 0)
         result (bash/run! "." "Run" chat/default-config
                           (fn [& _] (swap! requests inc) (response nil (call "b" "bash" {"body" "pwd"})))
                           (fn [_] {:status :denied :executed false}))]
     (is (= :denied (:status result)))
     (is (= 1 @requests))
-    (is (= "denied" (get (json/read-str (get (last (:messages result)) "content")) "status"))))
-  (let [result (bash/run! "." "Run" (assoc chat/default-config :max-turns 1)
-                          (fn [& _] (response nil (call "b" "bash" {"body" "pwd"})))
-                          (fn [_] {:status :exited :executed true :exit-code 0}))]
-    (is (= :stopped (:status result)))
-    (is (= :turn-budget-exhausted (get-in result [:errors 0 :type])))))
+    (is (= :denied (get-in (tool-result/parse (get (last (:messages result)) "content")) [:metadata :status])))))
+
+(deftest result-text-has-raw-streams-and-says-only-what-matters
+  (let [parsed (tool-result/parse (bash/result-text {:status :exited :executed true :exit-code 0
+                                                     :stdout {:text "x\ty \"z\"\n" :bytes-seen 8 :truncated? false}
+                                                     :stderr {:text "" :bytes-seen 0 :truncated? false}}))]
+    (is (= {:status :exited :executed true :exit-code 0} (:metadata parsed)))
+    (is (= [{:tag "stdout" :attrs {} :text "x\ty \"z\"\n"}] (:bodies parsed)) "an empty stream has no Body"))
+  (is (= {:status :timed-out :executed true :stdout {:bytes-seen 99 :truncated? true}}
+         (:metadata (tool-result/parse (bash/result-text {:status :timed-out :executed true
+                                                          :stdout {:text "x" :bytes-seen 99 :truncated? true}}))))))

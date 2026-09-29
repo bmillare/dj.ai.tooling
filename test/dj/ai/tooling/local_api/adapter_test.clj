@@ -2,7 +2,8 @@
   (:require [clojure.data.json :as json]
             [clojure.test :refer [deftest is testing]]
             [dj.ai.tooling.edit :as edit]
-            [dj.ai.tooling.local-api.adapter :as adapter]))
+            [dj.ai.tooling.local-api.adapter :as adapter]
+            [dj.ai.tooling.tool-result :as tool-result]))
 
 (defn call [id name args]
   {"id" id "type" "function"
@@ -75,8 +76,8 @@
     (is (= #{"p0"} (:eligible feedback)))
     (is (= ["a" "b" "c"] (mapv #(get % "tool_call_id") results)))
     (is (= ["p0" "p1" "p2"]
-           (mapv #(get-in (json/read-str (get % "content")) ["patch" "patch-id"]) results)))
-    (is (every? false? (map #(get (json/read-str (get % "content")) "committed") results)))))
+           (mapv #(get-in (tool-result/parse (get % "content")) [:metadata :patch :patch-id]) results)))
+    (is (every? false? (map #(get-in (tool-result/parse (get % "content")) [:metadata :committed]) results)))))
 
 (deftest only-search-errors-are-repairable
   (doseq [error [:invalid-path :file-already-exists :invalid-content :file-not-in-basis]]
