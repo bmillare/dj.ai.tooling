@@ -49,13 +49,6 @@
   (or (node graph node-id)
       (fail :node-not-found "Progress node does not exist." {:node-id node-id :role role})))
 
-(defn- normalize-node [value]
-  (-> value
-      (update :spawned-by #(set (or % #{})))
-      (update :resolves #(set (or % #{})))
-      (update :artifacts #(vec (or % [])))
-      (update :status #(or % :open))))
-
 (defn- valid-resolution? [resolver target]
   (or (and (= :done (:kind resolver)) (= :to-do (:kind target)))
       (and (= :know (:kind resolver)) (= :to-know (:kind target)))))
@@ -124,6 +117,13 @@
       (validate-author id author))
     (when (contains? value :layer)
       (validate-layer id layer))))
+
+(defn- normalize-node [value]
+  (-> value
+      (update :spawned-by #(set (or % #{})))
+      (update :resolves #(set (or % #{})))
+      (update :artifacts #(vec (or % [])))
+      (update :status #(or % :open))))
 
 (defn add-node
   "Adds one fully identified node and returns a new graph. Collection fields
